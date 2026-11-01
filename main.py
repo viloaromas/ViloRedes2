@@ -6,7 +6,7 @@ import google.generativeai as genai
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
-# Servidor web falso para mantener contento a Render en el plan gratuito
+# Servidor web falso para mantener activo Render en el plan gratuito
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -39,14 +39,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=chat_id, text="✨ Creando propuesta para tus redes...")
 
     try:
+        # Prompt optimizado para ajustar longitud por formato (Story, Reel, Post) y evitar textos cortados
         prompt_completo = (
-            f"Actúa como un experto en marketing visual y community manager para una tienda "
-            f"de aromatización y productos de limpieza. Responde de forma creativa, redactando copies atractivos, "
-            f"luces de fondos visuales o hashtags para esta solicitud: {user_message}"
+            f"Actúa como un experto en marketing visual y community manager para la marca 'Vilo Aromas' "
+            f"(tienda de aromatización y productos de limpieza).\n\n"
+            f"Solicitud del usuario: '{user_message}'\n\n"
+            f"Reglas de respuesta segun el tipo de contenido mencionado o solicitado:\n"
+            f"- Si pide una STORY: Escribe un texto ultra breve, directo y visual (máximo 250 caracteres).\n"
+            f"- Si pide un REEL / TIKTOK: Incluye gancho inicial, guion corto de 15 segundos y llamada a la acción (máximo 600 caracteres).\n"
+            f"- Si pide un POST DE FEED o sugerencia general: Escribe un copy persuasivo completo con emojis y hashtags (máximo 1500 caracteres).\n"
+            f"- IMPORTANTE: Concluye siempre la idea y la oración por completo. No dejes frases a la mitad ni respuestas incompletas."
         )
 
         response = model.generate_content(prompt_completo)
-        await context.bot.send_message(chat_id=chat_id, text=response.text)
+        texto_respuesta = response.text.strip()
+        
+        # Filtro de seguridad para el límite técnico de Telegram (4096 caracteres)
+        if len(texto_respuesta) > 4000:
+            # Buscar el último punto final antes del límite para no cortar oraciones a la mitad
+            corte = texto_respuesta[:4000].rfind('.')
+            if corte != -1:
+                texto_respuesta = texto_respuesta[:corte + 1]
+            else:
+                texto_respuesta = texto_respuesta[:4000]
+
+        await context.bot.send_message(chat_id=chat_id, text=texto_respuesta)
 
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
