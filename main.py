@@ -1,6 +1,6 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -23,24 +23,23 @@ def run_web_server():
 server_thread = threading.Thread(target=run_web_server, daemon=True)
 server_thread.start()
 
-# Credenciales de entorno
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# Credenciales de entorno (limpiando posibles espacios accidentales)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Inicializar Gemini
+# Inicializar Gemini correctamente
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Configuración de Google Drive mediante PyDrive2
 def init_drive():
     try:
         gauth = GoogleAuth()
         gauth.settings['client_config_backend'] = 'service'
         gauth.settings['service_config'] = {
-            'client_email': os.environ.get('GOOGLE_CLIENT_EMAIL', ''),
-            'private_key': os.environ.get('GOOGLE_PRIVATE_KEY', '').replace('\\n', '\n'),
+            'client_email': os.environ.get('GOOGLE_CLIENT_EMAIL', '').strip(),
+            'private_key': os.environ.get('GOOGLE_PRIVATE_KEY', '').strip().replace('\\n', '\n'),
         }
         gauth.ServiceAuth()
         return GoogleDrive(gauth)
@@ -48,7 +47,6 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Comando /start para mostrar el menú principal
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     menu_teclado = [
@@ -62,11 +60,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"¡Hola {user_name}! 👋 Bienvenido al asistente oficial de **Vilo Aromas**.\n\n"
         "Elige una opción del menú inferior o simplemente:\n"
         "• **Envía una foto** de tu producto con fondo blanco para procesarla y guardarla en Drive.\n"
-        "• **Escribe un texto o título** para que te genere el copy de marketing adaptado (Story, Reel o Post)."
+        "• **Escribe un texto o título** para que te genere el copy de marketing adaptado."
     )
     await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Manejador de mensajes de texto (Generación de Copywriting o botones del menú)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     chat_id = update.message.chat_id
@@ -120,7 +117,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
 
-# Manejador de imágenes
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     await context.bot.send_message(chat_id=chat_id, text="📸 Imagen recibida. Analizando producto y generando opciones de fondo con IA...")
@@ -136,7 +132,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Analiza este producto de Vilo Aromas (aromatización o limpieza). "
             "Proporciona 3 opciones de escenarios o fondos profesionales diferentes para destacar este producto "
             "(por ejemplo: fondo de mármol elegante, ambiente minimalista limpio, etc.). "
-            "Dale a cada opción un prompt descriptivo listo para generar la escena y redimensionarla según sea Story o Post."
+            "Dale a cada opción un prompt descriptivo listo para generar la escena."
         )
 
         response = model.generate_content([sample_file, prompt_vision])
@@ -158,7 +154,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error procesando la imagen: {str(e)}")
 
-# Callback para los botones de aprobación de imagen
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -192,4 +187,3 @@ if __name__ == '__main__':
     
     print("Bot avanzado de Vilo Aromas en marcha en Render!")
     app.run_polling()
-            
