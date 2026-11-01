@@ -1,7 +1,7 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CallbackQueryHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -33,17 +33,13 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Configuración de Google Drive mediante PyDrive2 y Service Account
-# Nota: Asegúrate de guardar el contenido de tu JSON en una variable de entorno llamada GOOGLE_CREDENTIALS_JSON 
-# o subir el archivo al repositorio con un nombre fijo (ej. credentials.json)
+# Configuración de Google Drive mediante PyDrive2
 def init_drive():
     try:
-        # Configuración automática usando un archivo local 'credentials.json' o variables
         gauth = GoogleAuth()
-        # Si prefieres usar archivo local en Render, guárdalo como credentials.json
         gauth.settings['client_config_backend'] = 'service'
         gauth.settings['service_config'] = {
-            'client_email': os.environ.get('GOOGLE_CLIENT_EMAIL', 'viloaromas@viloredes.iam.gserviceaccount.com'),
+            'client_email': os.environ.get('GOOGLE_CLIENT_EMAIL', ''),
             'private_key': os.environ.get('GOOGLE_PRIVATE_KEY', '').replace('\\n', '\n'),
         }
         gauth.ServiceAuth()
@@ -52,19 +48,51 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Manejador de mensajes de texto (Generación de Copywriting)
+# Comando /start para mostrar el menú principal
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name
+    menu_teclado = [
+        ["📸 Enviar Foto de Producto (Fondo Blanco)"],
+        ["📝 Redactar Copy (Story / Reel / Post)"],
+        ["❓ Ayuda / Estado"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(menu_teclado, resize_keyboard=True)
+    
+    mensaje_bienvenida = (
+        f"¡Hola {user_name}! 👋 Bienvenido al asistente oficial de **Vilo Aromas**.\n\n"
+        "Elige una opción del menú inferior o simplemente:\n"
+        "• **Envía una foto** de tu producto con fondo blanco para procesarla y guardarla en Drive.\n"
+        "• **Escribe un texto o título** para que te genere el copy de marketing adaptado (Story, Reel o Post)."
+    )
+    await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
+
+# Manejador de mensajes de texto (Generación de Copywriting o botones del menú)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text.lower()
+    user_message = update.message.text
     chat_id = update.message.chat_id
 
-    await context.bot.send_message(chat_id=chat_id, text="✨ Analizando formato y redactando propuesta para Vilo Aromas...")
+    if "Enviar Foto" in user_message:
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="📷 ¡Perfecto! Envía ahora la foto de tu producto con fondo blanco para que la analice y preparemos las opciones."
+        )
+        return
+    elif "Ayuda" in user_message:
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="ℹ️ **Cómo usar tu bot de Vilo Aromas:**\n1. Envía una foto con fondo blanco -> La analiza la IA y te da opciones para guardar en Drive.\n2. Envía un título/texto -> Te genera el texto persuasivo para redes sociales."
+        )
+        return
+
+    await context.bot.send_message(chat_id=chat_id, text="✨ Analizando solicitud y redactando propuesta para Vilo Aromas...")
 
     try:
-        if "story" in user_message or "historia" in user_message:
+        user_lower = user_message.lower()
+        if "story" in user_lower or "historia" in user_lower:
             formato_instruccion = "El usuario quiere una STORY. Redacta un texto ultra breve, directo y visual (máximo 250 caracteres)."
-        elif "reel" in user_message or "tiktok" in user_message or "video" in user_message:
+        elif "reel" in user_lower or "tiktok" in user_lower or "video" in user_lower:
             formato_instruccion = "El usuario quiere un REEL / TIKTOK. Incluye gancho inicial, guion corto de 15 segundos y llamada a la acción (máximo 600 caracteres)."
-        elif "post" in user_message or "feed" in user_message or "publicacion" in user_message:
+        elif "post" in user_lower or "feed" in user_lower or "publicacion" in user_lower:
             formato_instruccion = "El usuario quiere un POST DE FEED. Escribe un copy persuasivo completo con emojis y hashtags (máximo 1500 caracteres)."
         else:
             formato_instruccion = "Ofrece una estructura versátil de redes sociales con ideas de copy y hashtags (máximo 1000 caracteres)."
@@ -92,30 +120,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
 
-# Manejador de imágenes (Procesamiento visual y propuestas de fondo)
+# Manejador de imágenes
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     await context.bot.send_message(chat_id=chat_id, text="📸 Imagen recibida. Analizando producto y generando opciones de fondo con IA...")
 
     try:
-        # Descargar la foto enviada por Telegram
         photo_file = await update.message.photo[-1].get_file()
         photo_path = "temp_product.jpg"
         await photo_file.download_to_drive(photo_path)
 
-        # Subir y analizar con Gemini Multimodal
         sample_file = genai.upload_file(photo_path, mime_type="image/jpeg")
         
         prompt_vision = (
             "Analiza este producto de Vilo Aromas (aromatización o limpieza). "
             "Proporciona 3 opciones de escenarios o fondos profesionales diferentes para destacar este producto "
-            "(por ejemplo: fondo de mármol elegante con elementos naturales, ambiente minimalista limpio, etc.). "
-            "Dale a cada opción un prompt descriptivo listo para generar la escena y redimensionarla según sea Story (1080x1920) o Post (1080x1080)."
+            "(por ejemplo: fondo de mármol elegante, ambiente minimalista limpio, etc.). "
+            "Dale a cada opción un prompt descriptivo listo para generar la escena y redimensionarla según sea Story o Post."
         )
 
         response = model.generate_content([sample_file, prompt_vision])
-        
-        # Guardar temporalmente la ruta en context para la confirmación
         context.user_data['pending_photo'] = photo_path
 
         keyboard = [
@@ -134,7 +158,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error procesando la imagen: {str(e)}")
 
-# Callback para los botones de aprobación
+# Callback para los botones de aprobación de imagen
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -160,9 +184,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
     print("Bot avanzado de Vilo Aromas en marcha en Render!")
     app.run_polling()
+            
