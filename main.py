@@ -28,27 +28,13 @@ from telegram.ext import (
     filters,
 )
 
-# Librería estándar y estable para Gemini
 import google.generativeai as genai
 
-# DuckDuckGo para búsqueda de imágenes web
 try:
     from duckduckgo_search import DDGS
     DDGS_AVAILABLE = True
 except ImportError:
     DDGS_AVAILABLE = False
-
-# Segmentación local con rembg
-try:
-    from rembg import remove, new_session
-    REMBG_AVAILABLE = True
-except ImportError:
-    REMBG_AVAILABLE = False
-
-
-# ---------------------------------------------------------------------
-# CONFIGURACIÓN
-# ---------------------------------------------------------------------
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -58,7 +44,6 @@ PORT = int(os.environ.get("PORT", "10000"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/tmp/vilo_aromas"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "").strip()
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
 
 logging.basicConfig(
@@ -75,14 +60,7 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-_rembg_session = None
-_rembg_lock = threading.Lock()
-
 BACKGROUND_CATALOG = {
-    "blanco": [
-        "https://images.unsplash.com/photo-1602143407151-7111542de6e8?w=1400&q=90&fit=crop",
-        "https://images.unsplash.com/photo-1603569283847-aa295f0d016a?w=1400&q=90&fit=crop",
-    ],
     "lifestyle": [
         "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1600&q=90&fit=crop",
         "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1600&q=90&fit=crop",
@@ -90,9 +68,6 @@ BACKGROUND_CATALOG = {
     "premium": [
         "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?w=1600&q=90&fit=crop",
         "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1600&q=90&fit=crop",
-    ],
-    "publicidad": [
-        "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1600&q=90&fit=crop",
     ],
     "bano": ["https://images.unsplash.com/photo-1620626011761-996317b8d101?w=1600&q=90&fit=crop"],
     "dormitorio": ["https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?w=1600&q=90&fit=crop"],
@@ -105,17 +80,12 @@ STYLE_LABELS = {
     "dormitorio": "Dormitorio cálido",
     "natural": "Natural / botánico",
     "premium": "Premium / mármol y detalles finos",
-    "publicidad": "Publicidad para redes",
-    "blanco": "Catálogo fondo blanco",
+    "blanco": "Fondo blanco limpio",
 }
 
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "ViloAromasBot/2.0"})
 
-
-# ---------------------------------------------------------------------
-# SERVIDOR WEB PARA RENDER (HEALTH CHECK)
-# ---------------------------------------------------------------------
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -140,10 +110,6 @@ def run_web_server():
 
 threading.Thread(target=run_web_server, daemon=True).start()
 
-
-# ---------------------------------------------------------------------
-# UTILIDADES
-# ---------------------------------------------------------------------
 
 def user_folder(user_id):
     folder = DATA_DIR / str(user_id)
@@ -170,18 +136,14 @@ def save_original_image(image, user_id):
     return str(path)
 
 
-# ---------------------------------------------------------------------
-# GEMINI
-# ---------------------------------------------------------------------
-
 def identificar_producto(image):
     if not GEMINI_API_KEY:
-        return {"name": "Producto de aromatización", "search_terms": ["producto de aromatización"]}
+        return {"name": "Producto Vilo Aromas", "search_terms": ["vilo aromas"]}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = """
-Analiza la fotografía y lee lo que se distingue en el envase. Devuelve SOLO JSON válido:
-{"name":"nombre exacto visible","brand":"marca","line":"línea","scent":"fragancia","type":"tipo","search_terms":["3 consultas para buscar fotos"]}
+Analiza la fotografía y lee el envase. Devuelve SOLO JSON válido:
+{"name":"nombre exacto visible","search_terms":["3 consultas para buscar fotos"]}
 """
         response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
@@ -200,17 +162,13 @@ def redactar_copy(user_message):
     model = genai.GenerativeModel(GEMINI_MODEL)
     prompt = (
         "Actúa como community manager de Vilo Aromas, negocio de artículos "
-        "de limpieza y productos de aromatización. Escribe en español rioplatense, "
+        "de limpieza y aromatización. Escribe en español rioplatense, "
         "con tono comercial, claro y cercano.\n"
         f"Solicitud del usuario: {user_message}"
     )
     response = model.generate_content(prompt)
     return (response.text or "No pude generar el texto.").strip()
 
-
-# ---------------------------------------------------------------------
-# BÚSQUEDA WEB
-# ---------------------------------------------------------------------
 
 def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
     if not DDGS_AVAILABLE:
@@ -249,35 +207,22 @@ def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
     return results
 
 
-# ---------------------------------------------------------------------
-# COMPOSICIÓN VISUAL (REMBG + PILLOW)
-# ---------------------------------------------------------------------
-
-def get_rembg_session():
-    global _rembg_session
-    if not REMBG_AVAILABLE:
-        return None
-    with _rembg_lock:
-        if _rembg_session is None:
-            _rembg_session = new_session("u2net")
-    return _rembg_session
-
-
-def remove_background(product_image):
-    if not REMBG_AVAILABLE:
-        raise RuntimeError("rembg no está disponible.")
+def remove_background_pure(product_image):
+    """Recorte limpio por umbral de color blanco para proteger etiquetas y envase sin consumir RAM."""
     source = product_image.convert("RGBA")
-    result = remove(source, session=get_rembg_session())
-    mask = result.getchannel("A")
-
-    cutout = source.convert("RGB").convert("RGBA")
-    cutout.putalpha(mask)
-
-    alpha = cutout.getchannel("A")
-    bbox = alpha.getbbox()
+    datas = source.getdata()
+    new_data = []
+    for item in datas:
+        # Si el píxel es muy cercano al blanco puro, lo vuelve transparente
+        if item[0] > 245 and item[1] > 245 and item[2] > 245:
+            new_data.append((255, 255, 255, 0))
+        else:
+            new_data.append(item)
+    source.putdata(new_data)
+    bbox = source.getbbox()
     if not bbox:
-        raise RuntimeError("No se pudo detectar el producto.")
-    return cutout.crop(bbox)
+        return source
+    return source.crop(bbox)
 
 
 def download_background(url):
@@ -288,6 +233,9 @@ def download_background(url):
 
 
 def obtener_fondo(style, size=(1080, 1080)):
+    if style == "blanco":
+        return Image.new("RGB", size, (250, 250, 250)).convert("RGBA")
+    
     background = None
     urls = BACKGROUND_CATALOG.get(style, BACKGROUND_CATALOG.get("lifestyle", []))
     for url in (random.sample(urls, len(urls)) if urls else []):
@@ -299,14 +247,12 @@ def obtener_fondo(style, size=(1080, 1080)):
 
     if background is None:
         background = Image.new("RGB", size, (239, 236, 229))
-    if style == "blanco":
-        background = Image.new("RGB", size, (250, 250, 250))
 
     return background.resize(size, Image.Resampling.LANCZOS).convert("RGBA")
 
 
 def compose_product_scene(original_image, style):
-    product = remove_background(original_image)
+    product = remove_background_pure(original_image)
     canvas_size = (1080, 1080)
     background = obtener_fondo(style, canvas_size)
 
@@ -320,25 +266,21 @@ def compose_product_scene(original_image, style):
     product = product.resize(new_size, Image.Resampling.LANCZOS)
 
     alpha = product.getchannel("A")
-    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(24))
-    shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.30))
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(20))
+    shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.25))
     shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
     shadow.putalpha(shadow_alpha)
 
     x = (canvas_size[0] - product.width) // 2
-    y = canvas_size[1] - product.height - (100 if style == "blanco" else 115)
+    y = canvas_size[1] - product.height - 110
 
     shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-    shadow_layer.alpha_composite(shadow, (x + 10, y + 18))
+    shadow_layer.alpha_composite(shadow, (x + 8, y + 14))
     background = Image.alpha_composite(background, shadow_layer)
     background.alpha_composite(product, (x, y))
 
     return background.convert("RGB")
 
-
-# ---------------------------------------------------------------------
-# GOOGLE DRIVE
-# ---------------------------------------------------------------------
 
 def init_drive():
     try:
@@ -378,10 +320,6 @@ def guardar_en_drive(local_path, filename):
     return drive_file.get("alternateLink", "")
 
 
-# ---------------------------------------------------------------------
-# TELEGRAM HANDLERS
-# ---------------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "¡hola!"
     keyboard = [
@@ -404,7 +342,6 @@ async def mostrar_menu_principal(context, chat_id, product_name):
         [InlineKeyboardButton("🛏️ Dormitorio cálido", callback_data="estilo_dormitorio")],
         [InlineKeyboardButton("🌿 Natural / botánico", callback_data="estilo_natural")],
         [InlineKeyboardButton("✨ Premium / mármol", callback_data="estilo_premium")],
-        [InlineKeyboardButton("📢 Publicidad para redes", callback_data="estilo_publicidad")],
         [InlineKeyboardButton("⬜ Fondo blanco", callback_data="estilo_blanco")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ]
@@ -436,7 +373,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "ℹ️ Cómo usar el bot:\n"
             "1. Tocá Enviar Foto de Producto.\n"
-            "2. Mandá una foto nítida de tu envase.\n"
+            "2. Mandá una foto nítida de tu envase con fondo claro.\n"
             "3. Elegí buscar fotos en la web o armar una escena lifestyle profesional."
         )
         return
