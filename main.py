@@ -25,7 +25,6 @@ def run_web_server():
 server_thread = threading.Thread(target=run_web_server, daemon=True)
 server_thread.start()
 
-# Credenciales
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
@@ -58,10 +57,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(menu_teclado, resize_keyboard=True)
     
     mensaje_bienvenida = (
-        f"¡Hola {user_name}! 👋 Bienvenido al asistente de **Vilo Aromas**.\n\n"
-        "Selecciona **📸 Enviar Foto de Producto** para elegir el formato y tematizar tus artículos profesionalmente."
+        f"¡Hola {user_name}! 👋 Bienvenido al asistente de Vilo Aromas.\n\n"
+        "Selecciona 📸 Enviar Foto de Producto para elegir el formato y tematizar tus artículos."
     )
-    await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
@@ -77,7 +76,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = ReplyKeyboardMarkup(teclado_formatos, resize_keyboard=True, one_time_keyboard=True)
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="🎯 **Paso 1:** Selecciona el formato de red social:",
+            text="🎯 Paso 1: Selecciona el formato de red social:",
             reply_markup=reply_markup
         )
         return
@@ -85,11 +84,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ **Funcionamiento:**\n1. Elige formato y envía tu foto con fondo blanco.\n2. La IA te ofrecerá 3 opciones de fondos tematizados ideales para el producto.\n3. Selecciona tu fondo favorito para generar la imagen lista y aprobarla."
+            text="ℹ️ Funcionamiento:\n1. Elige formato y envía tu foto con fondo blanco.\n2. La IA te ofrecerá 3 opciones de fondos tematizados.\n3. Selecciona tu fondo favorito para generar la imagen final."
         )
         return
 
-    # Selección de formato
     if "Story" in user_message:
         context.user_data['tipo_formato'] = "Story"
         context.user_data['ancho'] = 1080
@@ -107,7 +105,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
         return
     else:
-        # Redacción normal de copys
         await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta de copy...")
         try:
             response = model.generate_content(f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'")
@@ -118,7 +115,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=chat_id, 
-        text="✅ **Paso 2:** Envía ahora la foto con fondo blanco de tu producto.",
+        text="✅ Paso 2: Envía ahora la foto con fondo blanco de tu producto.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -138,7 +135,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         
-        # Redimensionar base sin deformar
         image = Image.open(io.BytesIO(photo_bytes))
         imagen_base = Image.new("RGB", (ancho, alto), (255, 255, 255))
         image.thumbnail((ancho, alto), Image.Resampling.LANCZOS)
@@ -150,38 +146,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         imagen_base.save(photo_path, quality=95)
         context.user_data['pending_photo'] = photo_path
 
-        # Pedirle a Gemini que identifique el producto y sugiera 3 fondos tematizados específicos
         prompt_opciones = (
             "Analiza este producto de Vilo Aromas en la imagen. "
-            "Identifica de qué tipo de aromatizante o producto se trata (por ejemplo, notas de fruta, limpieza, etc.). "
             "Proporciona exactamente 3 opciones breves y atractivas de escenarios o fondos tematizados ideales para realzar este artículo "
-            "(ej. Opción 1: Rodajas frescas de fruta y hojas naturales / Opción 2: Superficie de mármol blanco minimalista con spa / Opción 3: Ambiente de hogar cálido y luminoso)."
+            "(ejemplo: Opción 1 con elementos naturales, Opción 2 con mármol minimalista, Opción 3 con hogar cálido)."
         )
 
         response = model.generate_content([imagen_base, prompt_opciones])
         texto_analisis = response.text.strip()
 
-        # Guardar el texto de opciones para referencia
-        context.user_data['opciones_fondos'] = texto_analisis
-
-        # Crear botones interactivos para elegir el fondo
         keyboard = [
             [InlineKeyboardButton("🌿 Opción 1: Elementos Naturales", callback_data="fondo_1")],
             [InlineKeyboardButton("💎 Opción 2: Mármol Minimalista", callback_data="fondo_2")],
-            [InlineKeyboardButton("☀️ Opción 3: Hogar Cálido / Luminoso", callback_data="fondo_3")],
+            [InlineKeyboardButton("☀️ Opción 3: Hogar Cálido", callback_data="fondo_3")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Enviado sin parse_mode para evitar errores de formato en Telegram
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"✨ **Producto analizado con éxito**\n\n"
+                f"✨ Producto analizado con éxito\n\n"
                 f"{texto_analisis}\n\n"
-                f"👉 **Elige abajo el fondo tematizado que prefieres aplicar:**"
+                f"👉 Elige abajo el fondo tematizado que prefieres aplicar:"
             ),
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -194,22 +184,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data in ["fondo_1", "fondo_2", "fondo_3"]:
         seleccion = query.data.replace("fondo_", "Opción ")
-        await query.edit_message_text(text=f"🎨 Aplicando {seleccion} tematizada (respetando etiquetas y producto al 100%)...")
+        await query.edit_message_text(text=f"🎨 Aplicando {seleccion} tematizada (respetando etiquetas y producto)...")
 
         try:
-            photo_path = context.user_data.get('temp_base.jpg', 'temp_base.jpg')
+            photo_path = context.user_data.get('pending_photo', 'temp_base.jpg')
             if os.path.exists(photo_path):
                 image = Image.open(photo_path)
                 
-                # Instrucción estricta para generar la imagen final tematizada
                 prompt_final = (
-                    f"Aplica una ambientación profesional basada en la {seleccion}, tematizada específicamente para este producto. "
-                    "REGLA CRÍTICA: Protege y mantén intactos el producto físico, las etiquetas, logotipos y textos originales. "
-                    "No deformes ni alteres el envase."
+                    f"Aplica una ambientación profesional basada en la {seleccion}, tematizada para este producto. "
+                    "REGLA CRÍTICA: Protege y mantén intactos el producto físico, las etiquetas, logotipos y textos originales."
                 )
                 model.generate_content([image, prompt_final])
 
-                # Opciones finales de aprobación
                 keyboard_aprobacion = [
                     [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
                     [InlineKeyboardButton("🔄 Elegir Otro Fondo", callback_data="reiniciar_fondo")],
@@ -221,12 +208,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=chat_id,
                     photo=open(photo_path, 'rb'),
                     caption=(
-                        f"✨ **¡Imagen tematizada con {seleccion}!**\n"
-                        f"*(Producto y etiquetas 100% protegidos)*\n\n"
+                        f"✨ ¡Imagen tematizada con {seleccion}!\n"
+                        f"(Producto y etiquetas 100% protegidos)\n\n"
                         f"¿Qué deseas hacer?"
                     ),
-                    reply_markup=reply_markup_aprob,
-                    parse_mode="Markdown"
+                    reply_markup=reply_markup_aprob
                 )
             else:
                 await context.bot.send_message(chat_id=chat_id, text="El archivo temporal expiró. Vuelve a enviar la foto.")
@@ -234,7 +220,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"Error generando la imagen final: {str(e)}")
 
     elif query.data == "save_drive":
-        await query.edit_message_caption(caption="☁️ Subiendo imagen aprobada a tu Google Drive de Vilo Aromas...")
+        await query.edit_message_caption(caption="☁️ Subiendo imagen aprobada a tu Google Drive...")
         try:
             drive = init_drive()
             photo_path = context.user_data.get('pending_photo', 'temp_base.jpg')
@@ -250,7 +236,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"Error al subir a Drive: {str(e)}")
 
     elif query.data == "reiniciar_fondo":
-        await query.edit_message_caption(caption="🔄 Por favor, selecciona de nuevo el formato y envía tu foto para probar otro fondo.")
+        await query.edit_message_caption(caption="🔄 Por favor, selecciona de nuevo el formato y envía tu foto.")
         context.user_data.clear()
     else:
         await query.edit_message_caption(caption="Operación cancelada.")
@@ -263,5 +249,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas ajustado y en marcha!")
+    print("Bot ajustado y en marcha sin errores de entidades!")
     app.run_polling()
