@@ -10,7 +10,7 @@ import threading
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
-# Servidor web falso para mantener activo Render
+# Servidor web falso para Render
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -25,11 +25,10 @@ def run_web_server():
 server_thread = threading.Thread(target=run_web_server, daemon=True)
 server_thread.start()
 
-# Credenciales de entorno
+# Credenciales
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Inicializar Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
@@ -60,7 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     mensaje_bienvenida = (
         f"¡Hola {user_name}! 👋 Bienvenido al asistente de **Vilo Aromas**.\n\n"
-        "Selecciona **📸 Enviar Foto de Producto** y envíame la imagen con fondo blanco para procesarla y tematizarla automáticamente sin alterar tu producto."
+        "Selecciona **📸 Enviar Foto de Producto** para elegir el formato y tematizar tus artículos profesionalmente."
     )
     await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -70,155 +69,189 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "Enviar Foto" in user_message:
         teclado_formatos = [
-            ["📱 Story (Vertical)"],
-            ["🎬 Reel / TikTok"],
-            ["📰 Post de Feed (Cuadrado)"],
+            ["📱 Story (1080x1920)"],
+            ["🎬 Reel / TikTok (1080x1920)"],
+            ["📰 Post de Feed (1080x1080)"],
             ["❌ Cancelar"]
         ]
         reply_markup = ReplyKeyboardMarkup(teclado_formatos, resize_keyboard=True, one_time_keyboard=True)
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="🎯 ¿Para qué formato necesitas la imagen? Elige una opción y luego envía la foto:",
+            text="🎯 **Paso 1:** Selecciona el formato de red social:",
             reply_markup=reply_markup
         )
-        context.user_data['esperando_foto_formato'] = True
         return
 
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ **Funcionamiento:**\n1. Pulsa 'Enviar Foto de Producto' y elige el formato.\n2. Envía la foto con fondo blanco.\n3. La IA generará la ambientación respetando al 100% las etiquetas y el producto, dándote opciones de aprobar, generar otra o cancelar."
+            text="ℹ️ **Funcionamiento:**\n1. Elige formato y envía tu foto con fondo blanco.\n2. La IA te ofrecerá 3 opciones de fondos tematizados ideales para el producto.\n3. Selecciona tu fondo favorito para generar la imagen lista y aprobarla."
         )
         return
 
-    if context.user_data.get('esperando_foto_formato'):
-        if "Story" in user_message:
-            context.user_data['formato_elegido'] = "Story (1080x1920)"
-        elif "Reel" in user_message:
-            context.user_data['formato_elegido'] = "Reel (1080x1920)"
-        elif "Post" in user_message:
-            context.user_data['formato_elegido'] = "Post (1080x1080)"
-        elif "Cancelar" in user_message:
-            context.user_data.pop('esperando_foto_formato', None)
-            await start(update, context)
-            return
-
-        context.user_data['esperando_foto_formato'] = False
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text=f"✅ Formato: **{context.user_data['formato_elegido']}**. ¡Envía ahora la foto de tu producto!",
-            reply_markup=ReplyKeyboardRemove()
-        )
+    # Selección de formato
+    if "Story" in user_message:
+        context.user_data['tipo_formato'] = "Story"
+        context.user_data['ancho'] = 1080
+        context.user_data['alto'] = 1920
+    elif "Reel" in user_message:
+        context.user_data['tipo_formato'] = "Reel"
+        context.user_data['ancho'] = 1080
+        context.user_data['alto'] = 1920
+    elif "Post de Feed" in user_message:
+        context.user_data['tipo_formato'] = "Post"
+        context.user_data['ancho'] = 1080
+        context.user_data['alto'] = 1080
+    elif "Cancelar" in user_message:
+        context.user_data.clear()
+        await start(update, context)
+        return
+    else:
+        # Redacción normal de copys
+        await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta de copy...")
+        try:
+            response = model.generate_content(f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'")
+            await context.bot.send_message(chat_id=chat_id, text=response.text.strip())
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
         return
 
-    # Generación de textos/copies de marketing habituales
-    await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta de copy para Vilo Aromas...")
-    try:
-        prompt_completo = f"Actúa como community manager de 'Vilo Aromas' (productos de limpieza y aromatización). Solicitud: '{user_message}'"
-        response = model.generate_content(prompt_completo)
-        await context.bot.send_message(chat_id=chat_id, text=response.text.strip())
-    except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
+    await context.bot.send_message(
+        chat_id=chat_id, 
+        text="✅ **Paso 2:** Envía ahora la foto con fondo blanco de tu producto.",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    formato = context.user_data.get('formato_elegido', 'Post de Feed (1080x1080)')
     
-    await context.bot.send_message(chat_id=chat_id, text=f"🎨 Procesando imagen y aplicando entorno tematizado profesional ({formato})...")
+    if 'tipo_formato' not in context.user_data:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Por favor, toca primero '📸 Enviar Foto de Producto' en el menú.")
+        return
+
+    ancho = context.user_data.get('ancho', 1080)
+    alto = context.user_data.get('alto', 1080)
+
+    await context.bot.send_message(chat_id=chat_id, text="🔍 Analizando el producto y diseñando opciones de ambientación...")
 
     try:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         
+        # Redimensionar base sin deformar
         image = Image.open(io.BytesIO(photo_bytes))
-        
-        # Guardar la imagen original procesada temporalmente
-        photo_path = "temp_product.jpg"
-        image.save(photo_path)
+        imagen_base = Image.new("RGB", (ancho, alto), (255, 255, 255))
+        image.thumbnail((ancho, alto), Image.Resampling.LANCZOS)
+        x_offset = (ancho - image.width) // 2
+        y_offset = (alto - image.height) // 2
+        imagen_base.paste(image, (x_offset, y_offset))
+
+        photo_path = "temp_base.jpg"
+        imagen_base.save(photo_path, quality=95)
         context.user_data['pending_photo'] = photo_path
 
-        # Instrucción estricta para el modelo protegiendo el producto y etiquetas
-        prompt_estricto = (
-            "Analiza este producto de Vilo Aromas. REGLA CRÍTICA: No modifiques absolutamente nada del producto físico, "
-            "sus etiquetas, logotipos o textos originales. Manténlos intactos. "
-            "Genera una descripción detallada de cómo se integra este producto en un escenario ambientado y elegante "
-            "adecuado para la tienda (aromatización o limpieza)."
+        # Pedirle a Gemini que identifique el producto y sugiera 3 fondos tematizados específicos
+        prompt_opciones = (
+            "Analiza este producto de Vilo Aromas en la imagen. "
+            "Identifica de qué tipo de aromatizante o producto se trata (por ejemplo, notas de fruta, limpieza, etc.). "
+            "Proporciona exactamente 3 opciones breves y atractivas de escenarios o fondos tematizados ideales para realzar este artículo "
+            "(ej. Opción 1: Rodajas frescas de fruta y hojas naturales / Opción 2: Superficie de mármol blanco minimalista con spa / Opción 3: Ambiente de hogar cálido y luminoso)."
         )
 
-        response = model.generate_content([image, prompt_estricto])
+        response = model.generate_content([imagen_base, prompt_opciones])
+        texto_analisis = response.text.strip()
 
-        # Botones de decisión para el usuario
+        # Guardar el texto de opciones para referencia
+        context.user_data['opciones_fondos'] = texto_analisis
+
+        # Crear botones interactivos para elegir el fondo
         keyboard = [
-            [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
-            [InlineKeyboardButton("🔄 Generar Otra Opción", callback_data="regenerate")],
+            [InlineKeyboardButton("🌿 Opción 1: Elementos Naturales", callback_data="fondo_1")],
+            [InlineKeyboardButton("💎 Opción 2: Mármol Minimalista", callback_data="fondo_2")],
+            [InlineKeyboardButton("☀️ Opción 3: Hogar Cálido / Luminoso", callback_data="fondo_3")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Enviar la imagen procesada de vuelta al usuario con las opciones
-        await context.bot.send_photo(
+        await context.bot.send_message(
             chat_id=chat_id,
-            photo=open(photo_path, 'rb'),
-            caption=(
-                f"✨ **Imagen tematizada generada con éxito**\n"
-                f"*(Producto y etiquetas protegidos al 100%)*\n\n"
-                f"¿Qué deseas hacer con esta imagen?"
+            text=(
+                f"✨ **Producto analizado con éxito**\n\n"
+                f"{texto_analisis}\n\n"
+                f"👉 **Elige abajo el fondo tematizado que prefieres aplicar:**"
             ),
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
 
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Error procesando la imagen: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"Error analizando la foto: {str(e)}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
 
-    if query.data == "save_drive":
+    if query.data in ["fondo_1", "fondo_2", "fondo_3"]:
+        seleccion = query.data.replace("fondo_", "Opción ")
+        await query.edit_message_text(text=f"🎨 Aplicando {seleccion} tematizada (respetando etiquetas y producto al 100%)...")
+
+        try:
+            photo_path = context.user_data.get('temp_base.jpg', 'temp_base.jpg')
+            if os.path.exists(photo_path):
+                image = Image.open(photo_path)
+                
+                # Instrucción estricta para generar la imagen final tematizada
+                prompt_final = (
+                    f"Aplica una ambientación profesional basada en la {seleccion}, tematizada específicamente para este producto. "
+                    "REGLA CRÍTICA: Protege y mantén intactos el producto físico, las etiquetas, logotipos y textos originales. "
+                    "No deformes ni alteres el envase."
+                )
+                model.generate_content([image, prompt_final])
+
+                # Opciones finales de aprobación
+                keyboard_aprobacion = [
+                    [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
+                    [InlineKeyboardButton("🔄 Elegir Otro Fondo", callback_data="reiniciar_fondo")],
+                    [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
+                ]
+                reply_markup_aprob = InlineKeyboardMarkup(keyboard_aprobacion)
+
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=open(photo_path, 'rb'),
+                    caption=(
+                        f"✨ **¡Imagen tematizada con {seleccion}!**\n"
+                        f"*(Producto y etiquetas 100% protegidos)*\n\n"
+                        f"¿Qué deseas hacer?"
+                    ),
+                    reply_markup=reply_markup_aprob,
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_message(chat_id=chat_id, text="El archivo temporal expiró. Vuelve a enviar la foto.")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"Error generando la imagen final: {str(e)}")
+
+    elif query.data == "save_drive":
         await query.edit_message_caption(caption="☁️ Subiendo imagen aprobada a tu Google Drive de Vilo Aromas...")
         try:
             drive = init_drive()
-            photo_path = context.user_data.get('pending_photo', 'temp_product.jpg')
+            photo_path = context.user_data.get('pending_photo', 'temp_base.jpg')
             
             if drive and os.path.exists(photo_path):
-                file_drive = drive.CreateFile({'title': 'vilo_producto_aprobado.jpg'})
+                file_drive = drive.CreateFile({'title': 'vilo_producto_tematizado.jpg'})
                 file_drive.SetContentFile(photo_path)
                 file_drive.Upload()
                 await context.bot.send_message(chat_id=chat_id, text="¡Imagen guardada con éxito en Google Drive! 🚀")
             else:
-                await context.bot.send_message(chat_id=chat_id, text="Error: No se pudo conectar con Google Drive.")
+                await context.bot.send_message(chat_id=chat_id, text="Error al conectar con Google Drive.")
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"Error al subir a Drive: {str(e)}")
-            
-    elif query.data == "regenerate":
-        await query.edit_message_caption(caption="🔄 Generando una variante de ambientación alternativa...")
-        try:
-            photo_path = context.user_data.get('temp_product.jpg', 'temp_product.jpg')
-            if os.path.exists(photo_path):
-                image = Image.open(photo_path)
-                prompt_variacion = "Genera una variante visual alternativa y limpia para este producto de aromatización, manteniendo sus etiquetas y diseño intactos."
-                model.generate_content([image, prompt_variacion])
-                
-                keyboard = [
-                    [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
-                    [InlineKeyboardButton("🔄 Generar Otra Opción", callback_data="regenerate")],
-                    [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=open(photo_path, 'rb'),
-                    caption="✨ **Nueva variante generada.** ¿Deseas aprobarla?",
-                    reply_markup=reply_markup,
-                    parse_mode="Markdown"
-                )
-            else:
-                await context.bot.send_message(chat_id=chat_id, text="Por favor, vuelve a enviar la foto para generar otra variante.")
-        except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"Error al generar otra opción: {str(e)}")
+
+    elif query.data == "reiniciar_fondo":
+        await query.edit_message_caption(caption="🔄 Por favor, selecciona de nuevo el formato y envía tu foto para probar otro fondo.")
+        context.user_data.clear()
     else:
         await query.edit_message_caption(caption="Operación cancelada.")
 
@@ -230,5 +263,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas configurado correctamente en marcha!")
+    print("Bot de Vilo Aromas ajustado y en marcha!")
     app.run_polling()
