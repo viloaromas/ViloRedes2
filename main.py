@@ -29,7 +29,6 @@ server_thread.start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Inicializar cliente oficial de Google GenAI para Gemini e Imagen 3
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -128,7 +127,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
         
-        # Análisis del producto con Gemini usando bytes
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG')
         img_byte_arr = img_byte_arr.getvalue()
@@ -194,7 +192,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=f"🎨 Renderizando escena fotorrealista con Imagen 3 basada en:\n_{idea_elegida}_", parse_mode="Markdown")
         
         try:
-            # Prompt en inglés optimizado para que Imagen 3 devuelva calidad publicitaria fotográfica
             prompt_imagen = (
                 f"Professional high-end commercial product photography of a premium bottle of '{product_name}' placed centrally on a clean luxury surface. "
                 f"Environment details: {idea_elegida}. "
