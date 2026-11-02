@@ -208,5 +208,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas operativo!")
-    app.run_polling()
+    print("Bot de Vilo Aromas operativo y limpio de webhooks!")
+    app.run_polling(drop_pending_updates=True)
