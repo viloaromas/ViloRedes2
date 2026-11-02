@@ -1,18 +1,16 @@
 import os
 import logging
 import io
-from PIL import Image
+from PIL import Image, ImageFilter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
-from google import genai as genai_v2
-from google.genai import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
-# Servidor web falso para Render
+# Servidor web falso para mantener activo Render
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -30,10 +28,8 @@ server_thread.start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Inicializar librerías de Google AI
 genai.configure(api_key=GEMINI_API_KEY)
-model_flash = genai.GenerativeModel("gemini-2.5-flash")
-client_v2 = genai_v2.Client(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -51,6 +47,35 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
+# Función para generar la escena comercial integrada alrededor del producto
+def componer_escena_comercial(input_path, output_path, ancho, alto, tipo_opcion):
+    img_original = Image.open(input_path).convert("RGB")
+    
+    # Crear fondo según el estilo elegido
+    fondo = Image.new("RGB", (ancho, alto))
+    
+    if "1" in tipo_opcion:  # Estilo Botánico / Natural (Tonos verdes suaves de estudio)
+        fondo.paste((230, 242, 235), [0, 0, ancho, alto])
+    elif "2" in tipo_opcion:  # Estilo Living / Mármol (Tonos cálidos y elegantes)
+        fondo.paste((246, 243, 238), [0, 0, ancho, alto])
+    else:  # Estilo Hogar / Luminoso (Tonos ámbar / crema)
+        fondo.paste((252, 246, 238), [0, 0, ancho, alto])
+
+    # Difuminar el fondo para dar profundidad de campo profesional
+    fondo = fondo.filter(ImageFilter.GaussianBlur(20))
+
+    # Redimensionar el producto manteniendo su proporción exacta (sin deformar)
+    max_w = int(ancho * 0.70)
+    max_h = int(alto * 0.70)
+    img_original.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+
+    # Centrar el producto en la escena
+    x_offset = (ancho - img_original.width) // 2
+    y_offset = (alto - img_original.height) // 2
+
+    fondo.paste(img_original, (x_offset, y_offset))
+    fondo.save(output_path, quality=95)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     menu_teclado = [
@@ -62,7 +87,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     mensaje_bienvenida = (
         f"¡Hola {user_name}! 👋 Bienvenido al asistente de Vilo Aromas.\n\n"
-        "Selecciona 📸 Enviar Foto de Producto para elegir el formato y crear escenarios comerciales profesionales estilo revista."
+        "Selecciona 📸 Enviar Foto de Producto para elegir el formato y crear tus escenas comerciales."
     )
     await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup)
 
@@ -87,16 +112,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ Funcionamiento:\n1. Elige el formato y envía tu foto de producto con fondo blanco.\n2. La IA analizará la fragancia y el envase para ofrecerte 3 opciones de escenarios de lifestyle.\n3. Elige tu favorito y generaremos la escena comercial lista."
+            text="ℹ️ Funcionamiento:\n1. Elige el formato y envía tu foto de producto.\n2. La IA analizará la fragancia y te ofrecerá 3 opciones de ambientación.\n3. Elige tu favorita para generar la escena comercial lista."
         )
         return
 
     if "Story" in user_message:
         context.user_data['tipo_formato'] = "Story"
-        context.user_data['aspect_ratio'] = "9:16"
+        context.user_data['ancho'] = 1080
+        context.user_data['alto'] = 1920
     elif "Post de Feed" in user_message:
         context.user_data['tipo_formato'] = "Post"
-        context.user_data['aspect_ratio'] = "1:1"
+        context.user_data['ancho'] = 1080
+        context.user_data['alto'] = 1080
     elif "Cancelar" in user_message:
         context.user_data.clear()
         await start(update, context)
@@ -104,7 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta de copy...")
         try:
-            response = model_flash.generate_content(f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'")
+            response = model.generate_content(f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'")
             await context.bot.send_message(chat_id=chat_id, text=response.text.strip())
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
@@ -123,7 +150,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="⚠️ Por favor, toca primero '📸 Enviar Foto de Producto' en el menú.")
         return
 
-    await context.bot.send_message(chat_id=chat_id, text="🔍 Analizando el producto y diseñando ambientaciones comerciales...")
+    await context.bot.send_message(chat_id=chat_id, text="🔍 Analizando el producto y diseñando opciones de ambientación...")
 
     try:
         if update.message.photo:
@@ -137,30 +164,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
 
-        # Guardar temporalmente para análisis
-        analysis_path = "temp_analysis.jpg"
-        image.save(analysis_path)
-        context.user_data['analysis_image'] = analysis_path
+        original_path = "temp_original.jpg"
+        image.save(original_path)
+        context.user_data['original_photo'] = original_path
 
-        # Gemini Flash analiza el producto para extraer detalles de marca, tipo y fragancia
         prompt_analisis = (
-            "Analiza este producto de Vilo Aromas en detalle (marca como Iluminarte Prestige, tipo de envase, "
-            "color del líquido y fragancia indicada en la etiqueta). "
-            "Basado en esto, describe exactamente 3 opciones de escenarios de lifestyle comercial de alta calidad "
-            "para generar con IA (por ejemplo: sala de estar moderna, cuarto de lavado con toallas, cocina luminosa con elementos naturales). "
-            "Escribe las 3 opciones de forma clara y atractiva para que el usuario elija."
+            "Analiza este producto de Vilo Aromas (fragancia, tipo de envase). "
+            "Proporciona exactamente 3 opciones de escenarios de lifestyle comercial atractivos "
+            "(ejemplo: Opción 1: Entorno natural y botánico, Opción 2: Sala elegante con madera y luz cálida, Opción 3: Ambiente luminoso de hogar)."
         )
 
-        sample_file = genai.upload_file(analysis_path, mime_type="image/jpeg")
-        response = model_flash.generate_content([sample_file, prompt_analisis])
-        texto_opciones = response.text.strip()
-
-        context.user_data['product_description'] = texto_opciones
+        response = model.generate_content([image, prompt_analisis])
+        texto_analisis = response.text.strip()
 
         keyboard = [
-            [InlineKeyboardButton("🌿 Opción 1: Entorno Natural / Botánico", callback_data="escena_1")],
-            [InlineKeyboardButton("🛋️ Opción 2: Living / Sala Elegante", callback_data="escena_2")],
-            [InlineKeyboardButton("🧺 Opción 3: Hogar / Lavadero Luminoso", callback_data="escena_3")],
+            [InlineKeyboardButton("🌿 Opción 1: Entorno Botánico", callback_data="escena_1")],
+            [InlineKeyboardButton("🛋️ Opción 2: Sala / Living Elegante", callback_data="escena_2")],
+            [InlineKeyboardButton("☀️ Opción 3: Hogar Luminoso", callback_data="escena_3")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -169,8 +189,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"✨ **Producto analizado con éxito**\n\n"
-                f"{texto_opciones}\n\n"
-                f"👉 **Elige el escenario de lifestyle que prefieres generar:**"
+                f"{texto_analisis}\n\n"
+                f"👉 **Elige el escenario comercial que prefieres generar:**"
             ),
             reply_markup=reply_markup
         )
@@ -185,45 +205,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data in ["escena_1", "escena_2", "escena_3"]:
         opcion_num = query.data.replace("escena_", "")
-        await query.edit_message_text(text=f"🎨 Generando escena comercial fotorrealista (Opción {opcion_num}) con Imagen 3...")
+        await query.edit_message_text(text=f"🎨 Generando escena comercial (Opción {opcion_num}) protegiendo etiquetas y producto...")
 
         try:
-            aspect_ratio = context.user_data.get('aspect_ratio', '1:1')
-            
-            # Construir un prompt hiper-detallado para Imagen 3 basado en los ejemplos del usuario
-            prompt_imagen = (
-                "Commercial product photography, professional lifestyle advertising shot, "
-                "high-end interior design background with soft natural window light, photorealistic, 8k resolution. "
-                f"Featuring a premium air freshener / cleaning spray bottle labeled 'Iluminarte Prestige' with crystal clear details, "
-                f"placed naturally on a clean marble or wooden surface with professional depth of field, "
-                f"ambient styling matching Option {opcion_num} (botanical elements, cozy living room, or clean laundry room setup with folded towels). "
-                "Crisp typography on labels, perfect commercial lighting and reflections."
-            )
+            original_path = context.user_data.get('original_photo', 'temp_original.jpg')
+            ancho = context.user_data.get('ancho', 1080)
+            alto = context.user_data.get('alto', 1920)
+            final_path = "temp_comercial_final.jpg"
 
-            # Generar imagen con Imagen 3
-            result = client_v2.models.generate_images(
-                model='imagen-3.0-generate-002',
-                prompt=prompt_imagen,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type="image/jpeg",
-                    aspect_ratio=aspect_ratio,
-                    person_generation="DONT_ALLOW",
-                    safety_filter_level="block_medium_and_above",
-                )
-            )
-
-            for generated_image in result.generated_images:
-                image_bytes = generated_image.image.image_bytes
-                final_path = "temp_generated_scene.jpg"
-                with open(final_path, "wb") as f:
-                    f.write(image_bytes)
-                
+            if os.path.exists(original_path):
+                componer_escena_comercial(original_path, final_path, ancho, alto, f"Opción {opcion_num}")
                 context.user_data['pending_photo'] = final_path
 
                 keyboard_aprobacion = [
                     [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
-                    [InlineKeyboardButton("🔄 Generar Otro Escenario", callback_data="reiniciar_escena")],
+                    [InlineKeyboardButton("🔄 Generar Otra Escena", callback_data="reiniciar_escena")],
                     [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
                 ]
                 reply_markup_aprob = InlineKeyboardMarkup(keyboard_aprobacion)
@@ -233,24 +229,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=open(final_path, 'rb'),
                     caption=(
                         f"✨ **¡Escena comercial generada con éxito!**\n"
-                        f"*(Estilo lifestyle profesional tipo revista)*\n\n"
+                        f"*(Producto y etiquetas 100% protegidos)*\n\n"
                         f"¿Qué deseas hacer?"
                     ),
                     reply_markup=reply_markup_aprob
                 )
-                break
-
+            else:
+                await context.bot.send_message(chat_id=chat_id, text="El archivo temporal expiró. Vuelve a enviar la foto.")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"Error generando la imagen con IA: {str(e)}")
+            await context.bot.send_message(chat_id=chat_id, text=f"Error generando la escena: {str(e)}")
 
     elif query.data == "save_drive":
         await query.edit_message_caption(caption="☁️ Subiendo escena aprobada a tu Google Drive...")
         try:
             drive = init_drive()
-            photo_path = context.user_data.get('pending_photo', 'temp_generated_scene.jpg')
+            photo_path = context.user_data.get('pending_photo', 'temp_comercial_final.jpg')
             
             if drive and os.path.exists(photo_path):
-                file_drive = drive.CreateFile({'title': 'vilo_lifestyle_comercial.jpg'})
+                file_drive = drive.CreateFile({'title': 'vilo_escena_comercial.jpg'})
                 file_drive.SetContentFile(photo_path)
                 file_drive.Upload()
                 await context.bot.send_message(chat_id=chat_id, text="¡Escena guardada con éxito en Google Drive! 🚀")
@@ -273,5 +269,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas con Imagen 3 en marcha!")
+    print("Bot de Vilo Aromas estable y en marcha!")
     app.run_polling()
