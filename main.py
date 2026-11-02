@@ -5,8 +5,7 @@ import requests
 from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from pydrive2.auth import GoogleAuth
@@ -29,7 +28,8 @@ server_thread.start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model_flash = genai.GenerativeModel("gemini-2.5-flash")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -55,10 +55,7 @@ def generar_ideas_personalizadas(product_name):
             f"de escenarios fotográficos comerciales estilo lifestyle (ej: entorno botánico con elementos naturales, superficie de mármol elegante, estudio moderno luminoso). "
             f"Devuelve únicamente las 3 ideas separadas por líneas, sin numeración ni textos extras."
         )
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
+        response = model_flash.generate_content(prompt)
         lineas = [l.strip() for l in response.text.strip().split('\n') if l.strip()]
         ideas = []
         for l in lineas:
@@ -105,10 +102,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta...")
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'"
-        )
+        response = model_flash.generate_content(f"Actúa como community manager de 'Vilo Aromas'. Solicitud: '{user_message}'")
         await context.bot.send_message(chat_id=chat_id, text=response.text.strip())
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Error: {str(e)}")
@@ -126,18 +120,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
-        
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG')
-        img_byte_arr = img_byte_arr.getvalue()
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(data=img_byte_arr, mime_type='image/jpeg'),
-                "Identifica la marca exacta, línea y tipo de este producto (ej: Aromatizante textil Vilo Aromas o similar). Escribe únicamente el nombre exacto sin explicaciones."
-            ]
-        )
+        response = model_flash.generate_content([
+            image,
+            "Identifica la marca exacta, línea y tipo de este producto (ej: Aromatizante textil Vilo Aromas o similar). Escribe únicamente el nombre exacto sin explicaciones."
+        ])
         product_name = response.text.strip()
         context.user_data['product_name'] = product_name
 
@@ -198,16 +185,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Studio lighting, soft shadows, photorealistic, 8k resolution, advertising quality, depth of field."
             )
 
-            result = client.models.generate_images(
+            # Uso correcto de la API de Imagen 3 con google-generativeai
+            result = genai.generate_images(
                 model='imagen-3.0-generate-002',
                 prompt=prompt_imagen,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type="image/jpeg",
-                    aspect_ratio="1:1",
-                    person_generation="DONT_ALLOW",
-                    safety_filter_level="block_medium_and_above",
-                )
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1",
+                person_generation="DONT_ALLOW",
+                safety_filter_level="block_medium_and_above",
             )
 
             final_path = "temp_imagen3_scene.jpg"
@@ -259,5 +245,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas con Imagen 3 operativo!")
+    print("Bot de Vilo Aromas operativo con Imagen 3!")
     app.run_polling(drop_pending_updates=True)
