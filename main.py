@@ -1,7 +1,7 @@
 import os
 import logging
 import io
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
@@ -46,40 +46,52 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Función mejorada: Crea una escena inmersiva sin recuadros blancos extraños
+# Función avanzada: Elimina el fondo blanco y fusiona el producto de manera realista
 def componer_escena_comercial(input_path, output_path, ancho, alto, tipo_opcion):
-    img_original = Image.open(input_path).convert("RGB")
+    img_original = Image.open(input_path).convert("RGBA")
     
-    # 1. Crear un fondo ambiental completo de alta gama según la opción
+    # 1. Convertir el fondo blanco de la foto en transparente de manera automática
+    datas = img_original.getdata()
+    new_data = []
+    for item in datas:
+        # Si el píxel es blanco o muy cercano a blanco, lo hacemos transparente
+        if item[0] > 240 and item[1] > 240 and item[2] > 240:
+            new_data.append((255, 255, 255, 0))
+        else:
+            new_data.append(item)
+    img_original.putdata(new_data)
+
+    # Recortar los bordes transparentes sobrantes para ajustar exactamente al producto
+    bbox = img_original.getbbox()
+    if bbox:
+        img_original = img_original.crop(bbox)
+
+    # 2. Crear un fondo ambiental completo de alta gama según la opción elegida
     fondo = Image.new("RGB", (ancho, alto))
-    if "1" in tipo_opcion:  # Botánico / Natural (Tonos verdes suaves y frescos)
-        fondo.paste((215, 235, 222), [0, 0, ancho, alto])
+    if "1" in tipo_opcion:  # Botánico / Natural (Tonos verdes suaves de estudio)
+        fondo.paste((220, 238, 225), [0, 0, ancho, alto])
     elif "2" in tipo_opcion:  # Living / Sala Elegante (Tonos madera clara / cálidos)
-        fondo.paste((238, 230, 218), [0, 0, ancho, alto])
+        fondo.paste((242, 234, 222), [0, 0, ancho, alto])
     else:  # Hogar Luminoso (Tonos crema / ámbar suave)
-        fondo.paste((248, 240, 228), [0, 0, ancho, alto])
+        fondo.paste((250, 243, 232), [0, 0, ancho, alto])
 
-    # Aplicar un difuminado profundo para simular profundidad de campo de cámara profesional
-    fondo = fondo.filter(ImageFilter.GaussianBlur(50))
+    # Aplicar un difuminado profundo para simular profundidad de campo profesional
+    fondo = fondo.filter(ImageFilter.GaussianBlur(40))
 
-    # 2. Escalar el producto para que ocupe una proporción elegante y protagonista (ej. 85% del alto total)
-    target_h = int(alto * 0.85)
+    # 3. Escalar el producto recortado para que destaque con elegancia (ej. 75% del alto total)
+    target_h = int(alto * 0.75)
     aspect_ratio = img_original.width / img_original.height
     target_w = int(target_h * aspect_ratio)
     
     img_original = img_original.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # 3. Calcular posición centrada inferior (para que repose de forma natural en la "superficie")
+    # 4. Calcular posición centrada inferior para que repose de forma natural
     x_offset = (ancho - target_w) // 2
-    y_offset = alto - target_h - int(alto * 0.08)
+    y_offset = alto - target_h - int(alto * 0.12)
 
-    # Superponer directamente sobre el fondo ambiental difuminado (sin marcos blancos)
-    fondo.paste(img_original, (x_offset, y_offset))
+    # Pegar el producto usando su propia transparencia (canal alfa) sobre el fondo difuminado
+    fondo.paste(img_original, (x_offset, y_offset), img_original)
     
-    # Añadir un realce sutil de brillo comercial
-    enhancer = ImageEnhance.Color(fondo)
-    fondo = enhancer.enhance(1.05)
-
     fondo.save(output_path, quality=95)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +223,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data in ["escena_1", "escena_2", "escena_3"]:
         opcion_num = query.data.replace("escena_", "")
-        await query.edit_message_text(text=f"🎨 Generando escena comercial inmersiva (Opción {opcion_num})...")
+        await query.edit_message_text(text=f"🎨 Eliminando fondo blanco y generando escena integrada (Opción {opcion_num})...")
 
         try:
             original_path = context.user_data.get('original_photo', 'temp_original.jpg')
@@ -234,8 +246,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=chat_id,
                     photo=open(final_path, 'rb'),
                     caption=(
-                        f"✨ **¡Escena comercial inmersiva generada!**\n"
-                        f"*(Sin recuadros blancos, producto 100% protegido)*\n\n"
+                        f"✨ **¡Escena comercial integrada con éxito!**\n"
+                        f"*(Fondo blanco removido y producto fusionado)*\n\n"
                         f"¿Qué deseas hacer?"
                     ),
                     reply_markup=reply_markup_aprob
@@ -275,5 +287,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas con escenas inmersivas listo!")
+    print("Bot de Vilo Aromas con remoción inteligente de fondo en marcha!")
     app.run_polling()
