@@ -277,4 +277,3 @@ if __name__ == '__main__':
     
     print("Bot de Vilo Aromas con escenas inmersivas listo!")
     app.run_polling()
-                       
