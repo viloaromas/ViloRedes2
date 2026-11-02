@@ -51,17 +51,15 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Búsqueda web estrictamente filtrada por el nombre exacto del producto
 def buscar_imagenes_web_filtrada(nombre_producto, max_resultados=3):
     urls_imagenes = []
     try:
         query_estricta = f"{nombre_producto} gatillo aromatizante"
         with DDGS() as ddgs:
-            results = ddgs.images(query=query_estricta, max_results=10)
+            results = ddgs.images(query=query_estricta, max_results=12)
             for r in results:
                 if 'image' in r:
                     url = r['image']
-                    # Filtrar asegurando que no se repitan y tengan buen formato
                     if url not in urls_imagenes and ('http://' in url or 'https://' in url):
                         urls_imagenes.append(url)
                 if len(urls_imagenes) >= max_resultados:
@@ -115,7 +113,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image.save(original_path)
         context.user_data['original_photo'] = original_path
 
-        # Identificación precisa de la marca y fragancia exacta
         prompt_id = "Identifica la marca exacta, línea y fragancia completa de este producto (por ejemplo: Iluminarte Prestige Mango Maracuyá). Escribe únicamente el nombre exacto sin explicaciones."
         response = model.generate_content([image, prompt_id])
         product_name = response.text.strip()
@@ -167,7 +164,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 continue
 
-        # Botón para buscar más y botón para volver al menú principal
         kb_control = [
             [InlineKeyboardButton("🔄 Buscar más resultados web", callback_data="buscar_mas_web")],
             [InlineKeyboardButton("🔙 Volver al menú principal", callback_data="volver_menu")]
@@ -264,7 +260,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             kb_aprob = [
                 [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive_escena")],
-                [InlineKeyboardButton("🔄 Volver al Menú Principal", callback_data="volver_menu")]
+                [InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="volver_menu")]
             ]
             await context.bot.send_photo(
                 chat_id=chat_id,
@@ -323,5 +319,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas actualizado con filtros y navegación completa en marcha!")
+    print("Bot de Vilo Aromas configurado con éxito!")
     app.run_polling()
