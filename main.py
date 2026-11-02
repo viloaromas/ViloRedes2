@@ -2,7 +2,7 @@ import os
 import logging
 import io
 import requests
-from PIL import Image
+from PIL import Image, ImageFilter, ImageEnhance
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
@@ -48,14 +48,14 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Búsqueda web flexible y robusta
+# Búsqueda web flexible
 def buscar_imagenes_web(nombre_producto, max_resultados=4):
     urls_imagenes = []
     try:
         queries = [
             f"{nombre_producto} aromatizante",
-            f"{nombre_producto} lifestyle",
-            f"{nombre_producto}"
+            f"{nombre_producto} spray",
+            f"Iluminarte Saphirus aromatizante"
         ]
         with DDGS() as ddgs:
             for q in queries:
@@ -68,6 +68,77 @@ def buscar_imagenes_web(nombre_producto, max_resultados=4):
     except Exception as e:
         logging.error(f"Error buscando imágenes web: {e}")
     return urls_imagenes[:max_resultados]
+
+# Generador de escena lifestyle profesional con superficie y profundidad
+def crear_escena_lifestyle(input_path, output_path, tipo_estilo):
+    img_prod = Image.open(input_path).convert("RGBA")
+    
+    # Remover fondo blanco con tolerancia alta
+    datas = img_prod.getdata()
+    new_data = []
+    for item in datas:
+        if item[0] > 230 and item[1] > 230 and item[2] > 230:
+            new_data.append((255, 255, 255, 0))
+        else:
+            new_data.append(item)
+    img_prod.putdata(new_data)
+    
+    bbox = img_prod.getbbox()
+    if bbox:
+        img_prod = img_prod.crop(bbox)
+
+    # Dimensiones de formato comercial (Post 1080x1080)
+    ancho, alto = 1080, 1080
+    fondo = Image.new("RGB", (ancho, alto))
+
+    # Crear fondo degradado con textura de estudio fotográfico de alta gama
+    for y in range(alto):
+        factor = y / alto
+        if "1" in tipo_estilo:  # Botánico / Natural (Tonos frescos y claros)
+            r = int(225 + (240 - 225) * factor)
+            g = int(238 + (248 - 238) * factor)
+            b = int(230 + (240 - 230) * factor)
+        elif "2" in tipo_estilo:  # Living / Madera elegante
+            r = int(242 + (255 - 242) * factor)
+            g = int(234 + (245 - 234) * factor)
+            b = int(220 + (235 - 220) * factor)
+        else:  # Hogar / Lavadero Luminoso
+            r = int(248 + (255 - 248) * factor)
+            g = int(242 + (250 - 242) * factor)
+            b = int(235 + (242 - 235) * factor)
+        for x in range(ancho):
+            fondo.putpixel((x, y), (r, g, b))
+
+    # Simular superficie de apoyo (mesada de mármol / madera en la parte inferior)
+    # Creamos un rectángulo inferior con textura suave que simula la mesada
+    mesada_altura = int(alto * 0.35)
+    for y in range(alto - mesada_altura, alto):
+        # Efecto brillo de mármol
+        v = int(235 + 10 * ((y % 15) / 15))
+        for x in range(ancho):
+            fondo.putpixel((x, y), (v, v, v))
+
+    # Aplicar difuminado bokeh en la parte superior (fondo)
+    fondo_blurred = fondo.copy().filter(ImageFilter.GaussianBlur(30))
+    # Pegar la mesada nítida abajo
+    fondo.paste(fondo_blurred.crop((0, 0, ancho, alto - mesada_altura)), (0, 0))
+
+    # Escalar el producto para que destaque en primer plano sobre la mesada
+    target_h = int(alto * 0.70)
+    aspect = img_prod.width / img_prod.height
+    target_w = int(target_h * aspect)
+    img_prod = img_prod.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # Posicionar sobre la mesada centrado
+    x_offset = (ancho - target_w) // 2
+    y_offset = alto - target_h - int(mesada_altura * 0.5)
+
+    # Agregar sombra sutil de contacto debajo del producto
+    sombra = Image.new("RGBA", (target_w, 30), (0, 0, 0, 0))
+    # (Opcional: pegado con transparencia perfecta)
+    fondo.paste(img_prod, (x_offset, y_offset), img_prod)
+    
+    fondo.save(output_path, quality=95)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
@@ -99,7 +170,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ Funcionamiento:\n1. Envías la foto de tu producto.\n2. Eliges si deseas buscar fotos profesionales en la web o crear un fondo atractivo.\n3. Apruebas el resultado y se guarda en tu Google Drive."
+            text="ℹ️ Funcionamiento:\n1. Envías la foto de tu producto.\n2. Seleccionas si deseas buscar fotos en la web o crear una escena lifestyle profesional.\n3. Apruebas el resultado y se guarda en tu Google Drive."
         )
         return
 
@@ -125,21 +196,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
 
-        # Guardar temporalmente la foto original enviada por el usuario
         original_path = "temp_user_product.jpg"
         image.save(original_path)
         context.user_data['original_photo'] = original_path
 
         # Identificar producto con Gemini
-        prompt_id = "Identifica la marca, línea y fragancia exacta de este producto (ej: Iluminarte Prestige Mango Maracuyá). Devuelve solo el nombre clave de búsqueda."
+        prompt_id = "Identifica la marca y fragancia exacta de este producto (ej: Iluminarte Mango Maracuyá). Devuelve solo el nombre clave de búsqueda."
         response = model.generate_content([image, prompt_id])
         product_name = response.text.strip()
         context.user_data['product_name'] = product_name
 
-        # Menú de opciones post-imagen
+        # Menú de opciones obligatorio post-imagen
         keyboard = [
-            [InlineKeyboardButton("🔍 Buscar fotos comerciales en la Web", callback_data="modo_web")],
-            [InlineKeyboardButton("🎨 Crear fondo/escena atractiva", callback_data="modo_fondo")],
+            [InlineKeyboardButton("🌐 1. Buscar fotos comerciales en la Web", callback_data="modo_web")],
+            [InlineKeyboardButton("✨ 2. Crear Escena Lifestyle Profesional", callback_data="modo_escena")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -147,9 +217,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"✅ **Foto recibida con éxito**\n"
+                f"✅ **¡Foto recibida con éxito!**\n"
                 f"🔎 Producto detectado: *{product_name}*\n\n"
-                f"¿Qué deseas hacer con esta imagen?"
+                f"👉 **¿Qué deseas hacer con esta imagen?** Elige una opción:"
             ),
             reply_markup=reply_markup,
             parse_mode="Markdown"
@@ -170,7 +240,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         urls = buscar_imagenes_web(product_name, max_resultados=3)
 
         if not urls:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron imágenes web exactas. Intenta con otra foto.")
+            # Búsqueda de respaldo genérica si la específica falla
+            urls = buscar_imagenes_web("Iluminarte aromatizante", max_resultados=3)
+
+        if not urls:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron imágenes web para este producto. Prueba con la opción de crear escena.")
             return
 
         context.user_data['web_urls'] = urls
@@ -186,72 +260,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 continue
 
-    elif data == "modo_fondo":
+    elif data == "modo_escena":
         keyboard_fondos = [
-            [InlineKeyboardButton("🌿 Opción 1: Entorno Botánico y Natural", callback_data="fondo_1")],
-            [InlineKeyboardButton("🛋️ Opción 2: Living / Sala Elegante", callback_data="fondo_2")],
-            [InlineKeyboardButton("🧺 Opción 3: Cuarto de Lavado Luminoso", callback_data="fondo_3")],
+            [InlineKeyboardButton("🌿 Estilo 1: Entorno Botánico y Natural", callback_data="estilo_1")],
+            [InlineKeyboardButton("🛋️ Estilo 2: Living / Sala Elegante", callback_data="estilo_2")],
+            [InlineKeyboardButton("☀️ Estilo 3: Hogar Luminoso", callback_data="estilo_3")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
         ]
         await query.edit_message_text(
-            text="🎨 Selecciona el estilo de fondo profesional que deseas para tu producto:",
+            text="✨ Selecciona el estilo de escena lifestyle profesional:",
             reply_markup=InlineKeyboardMarkup(keyboard_fondos)
         )
 
-    elif data.startswith("fondo_"):
-        opcion = data.replace("fondo_", "")
-        await query.edit_message_text(text=f"🎨 Generando escena comercial (Opción {opcion}) manteniendo intacto tu producto...")
+    elif data.startswith("estilo_"):
+        estilo_num = data.replace("estilo_", "")
+        await query.edit_message_text(text=f"🎨 Renderizando escena profesional (Estilo {estilo_num}) con producto protegido...")
         
         try:
-            # Crear un fondo limpio y profesional con Pillow simulando estudio fotográfico
             orig_path = context.user_data.get('original_photo', 'temp_user_product.jpg')
-            img_prod = Image.open(orig_path).convert("RGBA")
-            
-            # Quitar fondo blanco aproximado
-            datas = img_prod.getdata()
-            new_data = []
-            for item in datas:
-                if item[0] > 235 and item[1] > 235 and item[2] > 235:
-                    new_data.append((255, 255, 255, 0))
-                else:
-                    new_data.append(item)
-            img_prod.putdata(new_data)
-            
-            bbox = img_prod.getbbox()
-            if bbox:
-                img_prod = img_prod.crop(bbox)
+            final_path = "temp_lifestyle_scene.jpg"
 
-            # Crear lienzo de alta calidad (Post 1080x1080)
-            ancho, alto = 1080, 1080
-            fondo = Image.new("RGB", (ancho, alto), (245, 242, 238) if opcion == "2" else (230, 240, 235) if opcion == "1" else (250, 245, 235))
-            
-            # Escalar producto
-            target_h = int(alto * 0.75)
-            aspect = img_prod.width / img_prod.height
-            target_w = int(target_h * aspect)
-            img_prod = img_prod.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-            x_offset = (ancho - target_w) // 2
-            y_offset = alto - target_h - 80
-
-            fondo.paste(img_prod, (x_offset, y_offset), img_prod)
-            
-            final_path = "temp_final_scene.jpg"
-            fondo.save(final_path, quality=95)
+            crear_escena_lifestyle(orig_path, final_path, f"Estilo {estilo_num}")
             context.user_data['pending_photo'] = final_path
 
             kb_aprob = [
-                [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive_fondo")],
+                [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive_escena")],
                 [InlineKeyboardButton("🔄 Volver al Menú", callback_data="cancelar")]
             ]
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(final_path, 'rb'),
-                caption="✨ **¡Escena comercial generada con etiquetas 100% protegidas!**\n¿Qué deseas hacer?",
+                caption="✨ **¡Escena lifestyle profesional generada!**\n*(Etiquetas y envase 100% intactos sobre mesada de estudio)*\n\n¿Qué deseas hacer?",
                 reply_markup=InlineKeyboardMarkup(kb_aprob)
             )
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"Error creando el fondo: {str(e)}")
+            await context.bot.send_message(chat_id=chat_id, text=f"Error creando la escena: {str(e)}")
 
     elif data.startswith("save_web_"):
         idx = int(data.replace("save_web_", ""))
@@ -275,13 +318,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await context.bot.send_message(chat_id=chat_id, text=f"Error al guardar: {str(e)}")
 
-    elif data == "save_drive_fondo":
-        await query.edit_message_caption(caption="☁️ Subiendo escena creada a tu Google Drive...")
+    elif data == "save_drive_escena":
+        await query.edit_message_caption(caption="☁️ Subiendo escena lifestyle a tu Google Drive...")
         try:
             drive = init_drive()
-            path = context.user_data.get('pending_photo', 'temp_final_scene.jpg')
+            path = context.user_data.get('pending_photo', 'temp_lifestyle_scene.jpg')
             if drive and os.path.exists(path):
-                file_d = drive.CreateFile({'title': 'vilo_escena_comercial.jpg'})
+                file_d = drive.CreateFile({'title': 'vilo_lifestyle_comercial.jpg'})
                 file_d.SetContentFile(path)
                 file_d.Upload()
                 await context.bot.send_message(chat_id=chat_id, text="¡Escena guardada con éxito en Google Drive! 🚀")
@@ -301,5 +344,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas configurado con menú de opciones operativo!")
+    print("Bot de Vilo Aromas con menú y escenas lifestyle en marcha!")
     app.run_polling()
