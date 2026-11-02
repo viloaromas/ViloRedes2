@@ -104,13 +104,16 @@ def get_image_from_bytes(data):
 
 def identificar_producto(image):
     if not GEMINI_API_KEY:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
+        return {"name": "Saphirus Bergamota y Naranja", "search_terms": ["Saphirus Bergamota y Naranja", "Saphirus aerosol"]}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = """
-Analiza detalladamente la fotografía y lee con precisión el texto exacto de la etiqueta (marca, línea, tipo y fragancia exacta, por ejemplo: 'Saphirus Bergamota y Naranja' o 'Saphirus Linah'). 
-Devuelve SOLO JSON válido con este formato estricto:
-{"name":"nombre exacto completo","search_terms":["consulta precisa 1", "consulta precisa 2"]}
+Mira la imagen adjunta. Describe con precisión quirúrgica el producto para buscar una foto idéntica en internet:
+1. Marca (ej: Saphirus)
+2. Tipo de envase (ej: aerosol, difusor, gatillo)
+3. Sabor o fragancia exacta (ej: Bergamota y Naranja)
+Devuelve SOLO un JSON válido con este formato:
+{"name":"nombre del producto","search_terms":["consulta exacta 1", "consulta exacta 2"]}
 """
         response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
@@ -120,7 +123,7 @@ Devuelve SOLO JSON válido con este formato estricto:
         terms = data.get("search_terms") or [name]
         return {"name": name[:180], "search_terms": terms[:5]}
     except Exception:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
+        return {"name": "Saphirus Bergamota y Naranja", "search_terms": ["Saphirus Bergamota y Naranja", "Saphirus aerosol"]}
 
 
 def redactar_copy(user_message):
