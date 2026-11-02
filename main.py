@@ -61,7 +61,6 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Fondos profesionales con superficies de apoyo claras (mesas, encimeras, muebles bajos)
 BACKGROUND_CATALOG = {
     "lifestyle": [
         "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1600&q=90&fit=crop",
@@ -77,12 +76,12 @@ BACKGROUND_CATALOG = {
 }
 
 STYLE_LABELS = {
+    "blanco": "Fondo blanco limpio (Catálogo)",
     "lifestyle": "Lifestyle: living / hogar",
     "bano": "Baño elegante / spa",
     "dormitorio": "Dormitorio cálido",
     "natural": "Natural / botánico",
     "premium": "Premium / mármol y detalles finos",
-    "blanco": "Fondo blanco limpio",
 }
 
 HTTP = requests.Session()
@@ -145,7 +144,7 @@ def identificar_producto(image):
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = """
 Analiza la fotografía y lee el envase. Devuelve SOLO JSON válido:
-{"name":"nombre exacto visible","search_terms":["3 consultas para buscar fotos"]}
+{"name":"nombre exacto visible","search_terms":["3 consultas para buscar fotos en la web"]}
 """
         response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
@@ -234,7 +233,7 @@ def download_background(url):
 
 def obtener_fondo(style, size=(1080, 1080)):
     if style == "blanco":
-        return Image.new("RGB", size, (250, 250, 250)).convert("RGBA")
+        return Image.new("RGB", size, (255, 255, 255)).convert("RGBA")
     
     background = None
     urls = BACKGROUND_CATALOG.get(style, BACKGROUND_CATALOG.get("lifestyle", []))
@@ -256,9 +255,8 @@ def compose_product_scene(original_image, style):
     canvas_size = (1080, 1080)
     background = obtener_fondo(style, canvas_size)
 
-    # Escalar proporcionalmente para que el producto tenga un tamaño comercial armónico
-    max_height = 620 if style != "blanco" else 750
-    max_width = 520
+    max_height = 620 if style != "blanco" else 820
+    max_width = 520 if style != "blanco" else 750
     scale = min(max_width / product.width, max_height / product.height, 1.0)
     new_size = (
         max(1, int(product.width * scale)),
@@ -266,23 +264,25 @@ def compose_product_scene(original_image, style):
     )
     product = product.resize(new_size, Image.Resampling.LANCZOS)
 
-    # Generar sombra de contacto realista bajo el producto
-    alpha = product.getchannel("A")
-    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(16))
-    shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.35))
-    shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
-    shadow.putalpha(shadow_alpha)
-
-    # POSICIONAMIENTO LÓGICO: Ubicado firmemente apoyado sobre la superficie inferior de la escena
     x = (canvas_size[0] - product.width) // 2
-    # El eje Y se ajusta para que la base del envase apoye contra el tercio inferior del fondo (zona de muebles/mesas)
-    y = canvas_size[1] - product.height - 130
+    
+    if style == "blanco":
+        # Centrado perfecto para tienda online
+        y = (canvas_size[1] - product.height) // 2
+        background.alpha_composite(product, (x, y))
+    else:
+        # Apoyado de manera realista sobre la superficie en escenas lifestyle
+        y = canvas_size[1] - product.height - 130
+        alpha = product.getchannel("A")
+        shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(16))
+        shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.35))
+        shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
+        shadow.putalpha(shadow_alpha)
 
-    shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-    # Sombra proyectada detrás y debajo de la base del producto
-    shadow_layer.alpha_composite(shadow, (x + 12, y + product.height - 25))
-    background = Image.alpha_composite(background, shadow_layer)
-    background.alpha_composite(product, (x, y))
+        shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+        shadow_layer.alpha_composite(shadow, (x + 12, y + product.height - 25))
+        background = Image.alpha_composite(background, shadow_layer)
+        background.alpha_composite(product, (x, y))
 
     return background.convert("RGB")
 
@@ -341,23 +341,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mostrar_menu_principal(context, chat_id, product_name):
     keyboard = [
-        [InlineKeyboardButton("🌐 Buscar fotos de ESTE producto en la Web", callback_data="modo_web")],
+        [InlineKeyboardButton("🌐 Buscar fotos comerciales en la Web", callback_data="modo_web")],
+        [InlineKeyboardButton("⬜ Fondo blanco limpio (Catálogo)", callback_data="estilo_blanco")],
         [InlineKeyboardButton("🏡 Living / hogar", callback_data="estilo_lifestyle")],
         [InlineKeyboardButton("🛁 Baño elegante / spa", callback_data="estilo_bano")],
         [InlineKeyboardButton("🛏️ Dormitorio cálido", callback_data="estilo_dormitorio")],
         [InlineKeyboardButton("🌿 Natural / botánico", callback_data="estilo_natural")],
         [InlineKeyboardButton("✨ Premium / mármol", callback_data="estilo_premium")],
-        [InlineKeyboardButton("⬜ Fondo blanco", callback_data="estilo_blanco")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ]
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
             f"✅ Foto recibida y analizada\n"
-            f"🔎 Producto detectado: {product_name}\n\n"
+            f"🔎 Producto detectado: *{product_name}*\n\n"
             "Elegí qué acción querés realizar:"
         ),
         reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
     )
 
 
@@ -378,8 +379,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "ℹ️ Cómo usar el bot:\n"
             "1. Tocá Enviar Foto de Producto.\n"
-            "2. Mandá una foto nítida de tu envase con fondo claro.\n"
-            "3. Elegí buscar fotos en la web o armar una escena lifestyle profesional."
+            "2. Mandá una foto nítida de tu envase.\n"
+            "3. Elegí fondo blanco para tu tienda o buscar fotos comerciales en la web."
         )
         return
 
@@ -498,8 +499,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
-                    caption=f"✨ Escena estilo {STYLE_LABELS.get(style, '')} lista.",
+                    caption=f"✨ Estilo *{STYLE_LABELS.get(style, '')}* listo.",
                     reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown",
                 )
         except Exception as exc:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No pude crear la composición: {exc}")
@@ -529,7 +531,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(caption="☁️ Subiendo escena a Google Drive...")
             product = safe_filename(context.user_data.get("product_name", "producto"))
             style = safe_filename(context.user_data.get("last_style", "vilo"))
-            link = await asyncio_to_thread(guardar_en_drive, path, f"vilo_{product}_{style}_{uuid.uuid4().hex[:6]}.jpg")
+            link = await asyncio_to_thread(guardar_en_drive, path, f"vilo_{product}_{style}_{uuid.uuid4://hex[:6]}.jpg")
             await context.bot.send_message(chat_id=chat_id, text=f"🚀 Imagen guardada en Google Drive.\n{link}")
         return
 
