@@ -238,7 +238,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Añadir efecto de difuminado bokeh superior
             fondo = fondo.filter(ImageFilter.GaussianBlur(15))
 
-            # Crear superficie de apoyo inferior realista (efecto mesada/mármol suave)
+            # Crear superficie de apoyo inferior realista
             superficie = Image.new("RGB", (ancho, int(alto * 0.35)))
             for y in range(superficie.height):
                 v = int(230 + 12 * ((y % 20) / 20))
@@ -323,5 +323,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas totalmente optimizado en marcha!")
+    print("Bot de Vilo Aromas optimizado y listo!")
     app.run_polling()
