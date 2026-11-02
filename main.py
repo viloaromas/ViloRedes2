@@ -10,7 +10,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-from duckduckgo_search import DDGS
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -48,23 +47,6 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-def buscar_imagenes_web_filtrada(nombre_producto, max_resultados=3):
-    urls_imagenes = []
-    try:
-        query_estricta = f"{nombre_producto} gatillo aromatizante"
-        with DDGS() as ddgs:
-            results = ddgs.images(query=query_estricta, max_results=12)
-            for r in results:
-                if 'image' in r:
-                    url = r['image']
-                    if url not in urls_imagenes and ('http://' in url or 'https://' in url):
-                        urls_imagenes.append(url)
-                if len(urls_imagenes) >= max_resultados:
-                    break
-    except Exception as e:
-        logging.error(f"Error en búsqueda web estricta: {e}")
-    return urls_imagenes
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     menu_teclado = [
@@ -83,7 +65,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="✅ Envía ahora la foto de tu producto con fondo blanco.", reply_markup=ReplyKeyboardRemove())
         return
     elif "Ayuda" in user_message:
-        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Envía tu foto para buscar opciones precisas en la web o generar fondos profesionales.")
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Envía tu foto para generar fondos comerciales profesionales.")
         return
 
     await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta...")
@@ -110,28 +92,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image.save(original_path)
         context.user_data['original_photo'] = original_path
 
-        prompt_id = "Identifica la marca exacta, línea y fragancia completa de este producto (por ejemplo: Iluminarte Prestige Mango Maracuyá). Escribe únicamente el nombre exacto sin explicaciones."
+        prompt_id = "Identifica la marca exacta, línea y fragancia completa de este producto. Escribe únicamente el nombre exacto sin explicaciones."
         response = model.generate_content([image, prompt_id])
         product_name = response.text.strip()
         context.user_data['product_name'] = product_name
 
-        await mostrar_menu_principal(context, chat_id, product_name)
-
+        keyboard = [
+            [InlineKeyboardButton("✨ Generar Fondo Fotorrealista", callback_data="modo_escena")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ **Foto recibida y analizada**\n🔎 Producto detectado: *{product_name}*\n\n👉 **Selecciona una opción:**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Error procesando la foto: {str(e)}")
-
-async def mostrar_menu_principal(context, chat_id, product_name):
-    keyboard = [
-        [InlineKeyboardButton("🌐 1. Buscar fotos comerciales en la Web", callback_data="modo_web")],
-        [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista", callback_data="modo_escena")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
-    ]
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"✅ **Foto recibida y analizada**\n🔎 Producto detectado: *{product_name}*\n\n👉 **¿Qué deseas hacer?**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+        await context.bot.send_message(chat_id=chat_id, text=f"Error: {str(e)}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -139,59 +116,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     data = query.data
 
-    if data == "modo_web" or data == "buscar_mas_web":
-        await query.edit_message_text(text="🌐 Buscando imágenes web precisas del producto...")
-        product_name = context.user_data.get('product_name', 'aromatizante')
-        urls = buscar_imagenes_web_filtrada(product_name, max_resultados=3)
-
-        if not urls:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron más imágenes exactas. Prueba generando un fondo.")
-            return
-
-        context.user_data['web_urls'] = urls
-        for idx, url in enumerate(urls):
-            try:
-                keyboard_opt = [[InlineKeyboardButton(f"✅ Guardar Opción {idx+1} en Drive", callback_data=f"save_web_{idx}")]]
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=url,
-                    caption=f"🖼️ **Opción Web Precisa {idx+1}**",
-                    reply_markup=InlineKeyboardMarkup(keyboard_opt)
-                )
-            except Exception:
-                continue
-
-        kb_control = [
-            [InlineKeyboardButton("🔄 Buscar más resultados web", callback_data="buscar_mas_web")],
-            [InlineKeyboardButton("🔙 Volver al menú principal", callback_data="volver_menu")]
-        ]
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="¿Qué deseas hacer a continuación?",
-            reply_markup=InlineKeyboardMarkup(kb_control)
-        )
-
-    elif data == "modo_escena":
+    if data == "modo_escena":
         keyboard_fondos = [
             [InlineKeyboardButton("🌿 Estilo 1: Entorno Botánico y Natural", callback_data="estilo_1")],
             [InlineKeyboardButton("🛋️ Estilo 2: Living / Sala Elegante", callback_data="estilo_2")],
             [InlineKeyboardButton("☀️ Estilo 3: Hogar / Lavadero Luminoso", callback_data="estilo_3")],
-            [InlineKeyboardButton("🔙 Volver al menú principal", callback_data="volver_menu")]
-        ]
-        await query.edit_message_text(text="✨ Selecciona el estilo de fondo profesional a generar:", reply_markup=InlineKeyboardMarkup(keyboard_fondos))
-
-    elif data == "volver_menu":
-        product_name = context.user_data.get('product_name', 'Producto Vilo Aromas')
-        keyboard = [
-            [InlineKeyboardButton("🌐 1. Buscar fotos comerciales en la Web", callback_data="modo_web")],
-            [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista", callback_data="modo_escena")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
         ]
-        await query.message.reply_text(
-            text=f"🔄 **Menú principal**\n🔎 Producto: *{product_name}*\n\n👉 Elige una opción:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(text="✨ Selecciona el estilo de fondo profesional a generar:", reply_markup=InlineKeyboardMarkup(keyboard_fondos))
 
     elif data.startswith("estilo_"):
         estilo_num = data.replace("estilo_", "")
@@ -201,7 +133,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             orig_path = context.user_data.get('original_photo', 'temp_user_product.jpg')
             img_prod = Image.open(orig_path).convert("RGBA")
             
-            # Quitar fondo blanco de la foto original con alta tolerancia
             datas = img_prod.getdata()
             new_data = []
             for item in datas:
@@ -214,35 +145,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if bbox:
                 img_prod = img_prod.crop(bbox)
 
-            # Crear un fondo elegante tipo estudio fotográfico de alta gama
             ancho, alto = 1080, 1080
             fondo = Image.new("RGB", (ancho, alto))
 
             for y in range(alto):
                 factor = y / alto
-                if estilo_num == "1": # Botánico
+                if estilo_num == "1":
                     r = int(230 + (245 - 230) * factor)
                     g = int(242 + (252 - 242) * factor)
                     b = int(235 + (245 - 235) * factor)
-                elif estilo_num == "2": # Living
+                elif estilo_num == "2":
                     r = int(245 + (255 - 245) * factor)
                     g = int(238 + (248 - 238) * factor)
                     b = int(225 + (238 - 225) * factor)
-                else: # Lavadero luminoso
+                else:
                     r = int(250 + (255 - 250) * factor)
                     g = int(245 + (252 - 245) * factor)
                     b = int(238 + (245 - 238) * factor)
                 for x in range(ancho):
                     fondo.putpixel((x, y), (r, g, b))
 
-            # Simular superficie de apoyo limpia en la parte inferior
             mesada_altura = int(alto * 0.30)
             for y in range(alto - mesada_altura, alto):
                 v = int(235 + 8 * ((y % 10) / 10))
                 for x in range(ancho):
                     fondo.putpixel((x, y), (v, v, v))
 
-            # Redimensionar producto para ubicarlo sobre la superficie
             target_h = int(alto * 0.70)
             aspect = img_prod.width / img_prod.height
             target_w = int(target_h * aspect)
@@ -259,38 +187,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             kb_aprob = [
                 [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive_escena")],
-                [InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="volver_menu")]
+                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
             ]
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(final_path, 'rb'),
-                caption="✨ **¡Escena comercial generada con éxito!**\n*(Etiquetas y envase 100% intactos sobre superficie de estudio)*\n\n¿Qué deseas hacer?",
+                caption="✨ **¡Escena comercial generada con éxito!**\n*(Etiquetas y envase 100% intactos)*\n\n¿Qué deseas hacer?",
                 reply_markup=InlineKeyboardMarkup(kb_aprob)
             )
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"Error creando la escena: {str(e)}")
-
-    elif data.startswith("save_web_"):
-        idx = int(data.replace("save_web_", ""))
-        urls = context.user_data.get('web_urls', [])
-        if idx < len(urls):
-            await query.edit_message_caption(caption="☁️ Guardando imagen web en Google Drive...")
-            try:
-                img_data = requests.get(urls[idx]).content
-                local_f = "temp_web.jpg"
-                with open(local_f, 'wb') as f:
-                    f.write(img_data)
-                
-                drive = init_drive()
-                if drive:
-                    file_d = drive.CreateFile({'title': 'vilo_web_product.jpg'})
-                    file_d.SetContentFile(local_f)
-                    file_d.Upload()
-                    await context.bot.send_message(chat_id=chat_id, text="¡Imagen web guardada con éxito en Google Drive! 🚀")
-                else:
-                    await context.bot.send_message(chat_id=chat_id, text="Error conectando con Drive.")
-            except Exception as e:
-                await context.bot.send_message(chat_id=chat_id, text=f"Error: {str(e)}")
 
     elif data == "save_drive_escena":
         await query.edit_message_caption(caption="☁️ Subiendo escena a Google Drive...")
