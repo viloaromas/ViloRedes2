@@ -1,6 +1,8 @@
-python-telegram-bot
-google-generativeai
-pydrive2
-PyYAML
-pillow
-duckduckgo-search
+python-telegram-bot==21.10
+google-genai>=1.0.0
+pydrive2>=1.21.3
+Pillow>=10.4.0
+requests>=2.32.0
+ddgs>=9.0.0
+rembg[cpu]>=2.0.60
+PyYAML>=6.0.2
