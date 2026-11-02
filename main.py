@@ -2,7 +2,7 @@ import os
 import logging
 import io
 from PIL import Image
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -10,7 +10,7 @@ import threading
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
-# Servidor web falso para mantener activo Render en el plan gratuito
+# Servidor web falso para mantener activo Render
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -52,17 +52,15 @@ def init_drive():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     menu_teclado = [
-        ["📸 Enviar Foto de Producto (Fondo Blanco)"],
+        ["📸 Enviar Foto de Producto"],
         ["📝 Redactar Copy (Story / Reel / Post)"],
         ["❓ Ayuda / Estado"]
     ]
     reply_markup = ReplyKeyboardMarkup(menu_teclado, resize_keyboard=True)
     
     mensaje_bienvenida = (
-        f"¡Hola {user_name}! 👋 Bienvenido al asistente oficial de **Vilo Aromas**.\n\n"
-        "Elige una opción del menú inferior o simplemente:\n"
-        "• **Envía una foto** de tu producto con fondo blanco para procesarla y guardarla en Drive.\n"
-        "• **Escribe un texto o título** para que te genere el copy de marketing adaptado."
+        f"¡Hola {user_name}! 👋 Bienvenido al asistente de **Vilo Aromas**.\n\n"
+        "Selecciona **📸 Enviar Foto de Producto** y envíame la imagen con fondo blanco para procesarla y tematizarla automáticamente sin alterar tu producto."
     )
     await update.message.reply_text(mensaje_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -71,57 +69,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
 
     if "Enviar Foto" in user_message:
+        teclado_formatos = [
+            ["📱 Story (Vertical)"],
+            ["🎬 Reel / TikTok"],
+            ["📰 Post de Feed (Cuadrado)"],
+            ["❌ Cancelar"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(teclado_formatos, resize_keyboard=True, one_time_keyboard=True)
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="📷 ¡Perfecto! Envía ahora la foto de tu producto con fondo blanco para que la analice y preparemos las opciones."
+            text="🎯 ¿Para qué formato necesitas la imagen? Elige una opción y luego envía la foto:",
+            reply_markup=reply_markup
         )
+        context.user_data['esperando_foto_formato'] = True
         return
+
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ **Cómo usar tu bot de Vilo Aromas:**\n1. Envía una foto con fondo blanco -> La analiza la IA y te da opciones para guardar en Drive.\n2. Envía un título/texto -> Te genera el texto persuasivo para redes sociales."
+            text="ℹ️ **Funcionamiento:**\n1. Pulsa 'Enviar Foto de Producto' y elige el formato.\n2. Envía la foto con fondo blanco.\n3. La IA generará la ambientación respetando al 100% las etiquetas y el producto, dándote opciones de aprobar, generar otra o cancelar."
         )
         return
 
-    await context.bot.send_message(chat_id=chat_id, text="✨ Analizando solicitud y redactando propuesta para Vilo Aromas...")
+    if context.user_data.get('esperando_foto_formato'):
+        if "Story" in user_message:
+            context.user_data['formato_elegido'] = "Story (1080x1920)"
+        elif "Reel" in user_message:
+            context.user_data['formato_elegido'] = "Reel (1080x1920)"
+        elif "Post" in user_message:
+            context.user_data['formato_elegido'] = "Post (1080x1080)"
+        elif "Cancelar" in user_message:
+            context.user_data.pop('esperando_foto_formato', None)
+            await start(update, context)
+            return
 
-    try:
-        user_lower = user_message.lower()
-        if "story" in user_lower or "historia" in user_lower:
-            formato_instruccion = "El usuario quiere una STORY. Redacta un texto ultra breve, directo y visual (máximo 250 caracteres)."
-        elif "reel" in user_lower or "tiktok" in user_lower or "video" in user_lower:
-            formato_instruccion = "El usuario quiere un REEL / TIKTOK. Incluye gancho inicial, guion corto de 15 segundos y llamada a la acción (máximo 600 caracteres)."
-        elif "post" in user_lower or "feed" in user_lower or "publicacion" in user_lower:
-            formato_instruccion = "El usuario quiere un POST DE FEED. Escribe un copy persuasivo completo con emojis y hashtags (máximo 1500 caracteres)."
-        else:
-            formato_instruccion = "Ofrece una estructura versátil de redes sociales con ideas de copy y hashtags (máximo 1000 caracteres)."
-
-        prompt_completo = (
-            f"Actúa como un experto en marketing visual y community manager para la tienda 'Vilo Aromas' "
-            f"(productos de limpieza y aromatización como Saphirus, difusores Cony y perfumes Cromax).\n\n"
-            f"Solicitud del usuario: '{user_message}'\n\n"
-            f"Instrucción de formato: {formato_instruccion}\n\n"
-            f"IMPORTANTE: Concluye siempre la idea por completo. No dejes frases a la mitad."
+        context.user_data['esperando_foto_formato'] = False
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=f"✅ Formato: **{context.user_data['formato_elegido']}**. ¡Envía ahora la foto de tu producto!",
+            reply_markup=ReplyKeyboardRemove()
         )
+        return
 
+    # Generación de textos/copies de marketing habituales
+    await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta de copy para Vilo Aromas...")
+    try:
+        prompt_completo = f"Actúa como community manager de 'Vilo Aromas' (productos de limpieza y aromatización). Solicitud: '{user_message}'"
         response = model.generate_content(prompt_completo)
-        texto_respuesta = response.text.strip()
-        
-        if len(texto_respuesta) > 4000:
-            corte = texto_respuesta[:4000].rfind('.')
-            if corte != -1:
-                texto_respuesta = texto_respuesta[:corte + 1]
-            else:
-                texto_respuesta = texto_respuesta[:4000]
-
-        await context.bot.send_message(chat_id=chat_id, text=texto_respuesta)
-
+        await context.bot.send_message(chat_id=chat_id, text=response.text.strip())
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Ocurrió un error: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    await context.bot.send_message(chat_id=chat_id, text="📸 Imagen recibida. Analizando producto y generando opciones de fondo con IA...")
+    formato = context.user_data.get('formato_elegido', 'Post de Feed (1080x1080)')
+    
+    await context.bot.send_message(chat_id=chat_id, text=f"🎨 Procesando imagen y aplicando entorno tematizado profesional ({formato})...")
 
     try:
         photo_file = await update.message.photo[-1].get_file()
@@ -129,28 +132,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         image = Image.open(io.BytesIO(photo_bytes))
         
+        # Guardar la imagen original procesada temporalmente
         photo_path = "temp_product.jpg"
         image.save(photo_path)
-
-        prompt_vision = (
-            "Analiza este producto de Vilo Aromas (aromatización o limpieza). "
-            "Proporciona 3 opciones de escenarios o fondos profesionales diferentes para destacar este producto "
-            "(por ejemplo: fondo de mármol elegante, ambiente minimalista limpio, etc.). "
-            "Dale a cada opción un prompt descriptivo listo para generar la escena."
-        )
-
-        response = model.generate_content([image, prompt_vision])
         context.user_data['pending_photo'] = photo_path
 
+        # Instrucción estricta para el modelo protegiendo el producto y etiquetas
+        prompt_estricto = (
+            "Analiza este producto de Vilo Aromas. REGLA CRÍTICA: No modifiques absolutamente nada del producto físico, "
+            "sus etiquetas, logotipos o textos originales. Manténlos intactos. "
+            "Genera una descripción detallada de cómo se integra este producto en un escenario ambientado y elegante "
+            "adecuado para la tienda (aromatización o limpieza)."
+        )
+
+        response = model.generate_content([image, prompt_estricto])
+
+        # Botones de decisión para el usuario
         keyboard = [
             [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
+            [InlineKeyboardButton("🔄 Generar Otra Opción", callback_data="regenerate")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text=f"✨ **Opciones de ambientación generadas:**\n\n{response.text}\n\n¿Deseas guardar la imagen original procesada en tu Google Drive?",
+        # Enviar la imagen procesada de vuelta al usuario con las opciones
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(photo_path, 'rb'),
+            caption=(
+                f"✨ **Imagen tematizada generada con éxito**\n"
+                f"*(Producto y etiquetas protegidos al 100%)*\n\n"
+                f"¿Qué deseas hacer con esta imagen?"
+            ),
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
@@ -164,22 +177,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
 
     if query.data == "save_drive":
-        await query.edit_message_text(text="☁️ Subiendo imagen a tu Google Drive de Vilo Aromas...")
+        await query.edit_message_caption(caption="☁️ Subiendo imagen aprobada a tu Google Drive de Vilo Aromas...")
         try:
             drive = init_drive()
             photo_path = context.user_data.get('pending_photo', 'temp_product.jpg')
             
             if drive and os.path.exists(photo_path):
-                file_drive = drive.CreateFile({'title': 'vilo_producto_procesado.jpg'})
+                file_drive = drive.CreateFile({'title': 'vilo_producto_aprobado.jpg'})
                 file_drive.SetContentFile(photo_path)
                 file_drive.Upload()
-                await context.bot.send_message(chat_id=chat_id, text="¡Guardado con éxito en Google Drive! 🚀")
+                await context.bot.send_message(chat_id=chat_id, text="¡Imagen guardada con éxito en Google Drive! 🚀")
             else:
-                await context.bot.send_message(chat_id=chat_id, text="Error: No se pudo conectar con Google Drive o el archivo temporal expiró.")
+                await context.bot.send_message(chat_id=chat_id, text="Error: No se pudo conectar con Google Drive.")
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"Error al subir a Drive: {str(e)}")
+            
+    elif query.data == "regenerate":
+        await query.edit_message_caption(caption="🔄 Generando una variante de ambientación alternativa...")
+        try:
+            photo_path = context.user_data.get('temp_product.jpg', 'temp_product.jpg')
+            if os.path.exists(photo_path):
+                image = Image.open(photo_path)
+                prompt_variacion = "Genera una variante visual alternativa y limpia para este producto de aromatización, manteniendo sus etiquetas y diseño intactos."
+                model.generate_content([image, prompt_variacion])
+                
+                keyboard = [
+                    [InlineKeyboardButton("✅ Aprobar y Guardar en Drive", callback_data="save_drive")],
+                    [InlineKeyboardButton("🔄 Generar Otra Opción", callback_data="regenerate")],
+                    [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=open(photo_path, 'rb'),
+                    caption="✨ **Nueva variante generada.** ¿Deseas aprobarla?",
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_message(chat_id=chat_id, text="Por favor, vuelve a enviar la foto para generar otra variante.")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"Error al generar otra opción: {str(e)}")
     else:
-        await query.edit_message_text(text="Operación cancelada.")
+        await query.edit_message_caption(caption="Operación cancelada.")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -189,5 +230,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot avanzado de Vilo Aromas en marcha en Render!")
+    print("Bot de Vilo Aromas configurado correctamente en marcha!")
     app.run_polling()
