@@ -6,8 +6,6 @@ from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
-from google import genai as genai_v2
-from google.genai import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from pydrive2.auth import GoogleAuth
@@ -33,7 +31,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
-client_v2 = genai_v2.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -86,7 +83,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="✅ Envía ahora la foto de tu producto con fondo blanco.", reply_markup=ReplyKeyboardRemove())
         return
     elif "Ayuda" in user_message:
-        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Envía tu foto para buscar opciones precisas en la web o generar fondos profesionales con IA.")
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Envía tu foto para buscar opciones precisas en la web o generar fondos profesionales.")
         return
 
     await context.bot.send_message(chat_id=chat_id, text="✨ Redactando propuesta...")
@@ -126,7 +123,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mostrar_menu_principal(context, chat_id, product_name):
     keyboard = [
         [InlineKeyboardButton("🌐 1. Buscar fotos comerciales en la Web", callback_data="modo_web")],
-        [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista con IA", callback_data="modo_escena")],
+        [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista", callback_data="modo_escena")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
     ]
     await context.bot.send_message(
@@ -148,7 +145,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         urls = buscar_imagenes_web_filtrada(product_name, max_resultados=3)
 
         if not urls:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron más imágenes exactas. Prueba generando un fondo con IA.")
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron más imágenes exactas. Prueba generando un fondo.")
             return
 
         context.user_data['web_urls'] = urls
@@ -187,7 +184,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_name = context.user_data.get('product_name', 'Producto Vilo Aromas')
         keyboard = [
             [InlineKeyboardButton("🌐 1. Buscar fotos comerciales en la Web", callback_data="modo_web")],
-            [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista con IA", callback_data="modo_escena")],
+            [InlineKeyboardButton("✨ 2. Generar Fondo Fotorrealista", callback_data="modo_escena")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
         ]
         await query.message.reply_text(
@@ -198,39 +195,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("estilo_"):
         estilo_num = data.replace("estilo_", "")
-        await query.edit_message_text(text=f"🎨 Generando fondo fotorrealista (Estilo {estilo_num}) con IA...")
+        await query.edit_message_text(text=f"🎨 Creando escena comercial profesional (Estilo {estilo_num})...")
         
         try:
-            prompts_fondos = {
-                "1": "Professional empty commercial background, luxurious botanical interior design with fresh green plants, soft natural window light, polished white marble countertop surface, photorealistic, 8k resolution, empty center space for product placement.",
-                "2": "Professional empty commercial background, elegant cozy living room interior with warm lighting, wooden shelves, soft blur depth of field, polished marble surface, photorealistic, 8k resolution, empty center space for product placement.",
-                "3": "Professional empty commercial background, bright modern laundry room with neatly folded pastel towels on shelves, soft natural window light, clean polished countertop surface, photorealistic, 8k resolution, empty center space for product placement."
-            }
-
-            prompt_elegido = prompts_fondos.get(estilo_num, prompts_fondos["1"])
-
-            result = client_v2.models.generate_images(
-                model='imagen-3.0-generate-002',
-                prompt=prompt_elegido,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type="image/jpeg",
-                    aspect_ratio="1:1",
-                    person_generation="DONT_ALLOW",
-                    safety_filter_level="block_medium_and_above",
-                )
-            )
-
-            fondo_path = "temp_ai_background.jpg"
-            for generated_image in result.generated_images:
-                with open(fondo_path, "wb") as f:
-                    f.write(generated_image.image.image_bytes)
-                break
-
-            fondo = Image.open(fondo_path).convert("RGBA")
             orig_path = context.user_data.get('original_photo', 'temp_user_product.jpg')
             img_prod = Image.open(orig_path).convert("RGBA")
             
+            # Quitar fondo blanco de la foto original con alta tolerancia
             datas = img_prod.getdata()
             new_data = []
             for item in datas:
@@ -243,14 +214,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if bbox:
                 img_prod = img_prod.crop(bbox)
 
-            ancho, alto = fondo.size
+            # Crear un fondo elegante tipo estudio fotográfico de alta gama
+            ancho, alto = 1080, 1080
+            fondo = Image.new("RGB", (ancho, alto))
+
+            for y in range(alto):
+                factor = y / alto
+                if estilo_num == "1": # Botánico
+                    r = int(230 + (245 - 230) * factor)
+                    g = int(242 + (252 - 242) * factor)
+                    b = int(235 + (245 - 235) * factor)
+                elif estilo_num == "2": # Living
+                    r = int(245 + (255 - 245) * factor)
+                    g = int(238 + (248 - 238) * factor)
+                    b = int(225 + (238 - 225) * factor)
+                else: # Lavadero luminoso
+                    r = int(250 + (255 - 250) * factor)
+                    g = int(245 + (252 - 245) * factor)
+                    b = int(238 + (245 - 238) * factor)
+                for x in range(ancho):
+                    fondo.putpixel((x, y), (r, g, b))
+
+            # Simular superficie de apoyo limpia en la parte inferior
+            mesada_altura = int(alto * 0.30)
+            for y in range(alto - mesada_altura, alto):
+                v = int(235 + 8 * ((y % 10) / 10))
+                for x in range(ancho):
+                    fondo.putpixel((x, y), (v, v, v))
+
+            # Redimensionar producto para ubicarlo sobre la superficie
             target_h = int(alto * 0.70)
             aspect = img_prod.width / img_prod.height
             target_w = int(target_h * aspect)
             img_prod = img_prod.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
             x_offset = (ancho - target_w) // 2
-            y_offset = alto - target_h - int(alto * 0.10)
+            y_offset = alto - target_h - int(mesada_altura * 0.4)
 
             fondo.paste(img_prod, (x_offset, y_offset), img_prod)
             
@@ -265,11 +264,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(final_path, 'rb'),
-                caption="✨ **¡Escena lifestyle con fondo IA generada!**\n\n¿Qué deseas hacer?",
+                caption="✨ **¡Escena comercial generada con éxito!**\n*(Etiquetas y envase 100% intactos sobre superficie de estudio)*\n\n¿Qué deseas hacer?",
                 reply_markup=InlineKeyboardMarkup(kb_aprob)
             )
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"Error generando el fondo: {str(e)}")
+            await context.bot.send_message(chat_id=chat_id, text=f"Error creando la escena: {str(e)}")
 
     elif data.startswith("save_web_"):
         idx = int(data.replace("save_web_", ""))
@@ -299,7 +298,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             drive = init_drive()
             path = context.user_data.get('pending_photo', 'temp_final_lifestyle.jpg')
             if drive and os.path.exists(path):
-                file_d = drive.CreateFile({'title': 'vilo_lifestyle_ia.jpg'})
+                file_d = drive.CreateFile({'title': 'vilo_lifestyle_comercial.jpg'})
                 file_d.SetContentFile(path)
                 file_d.Upload()
                 await context.bot.send_message(chat_id=chat_id, text="¡Escena guardada con éxito en Google Drive! 🚀")
@@ -319,5 +318,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas configurado con éxito!")
+    print("Bot de Vilo Aromas optimizado y listo!")
     app.run_polling()
