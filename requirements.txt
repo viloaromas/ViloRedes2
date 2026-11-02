@@ -1,4 +1,5 @@
 python-telegram-bot
 google-generativeai
 pydrive2
+PyYAML
 pillow
