@@ -1,6 +1,5 @@
-
 python-telegram-bot
 google-generativeai
 pydrive2
 pillow
-google-genai
+duckduckgo_search
