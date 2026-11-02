@@ -3,3 +3,4 @@ google-generativeai
 pydrive2
 PyYAML
 pillow
+duckduckgo-search
