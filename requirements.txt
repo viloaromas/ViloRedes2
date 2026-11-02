@@ -2,4 +2,4 @@ python-telegram-bot
 google-generativeai
 pydrive2
 pillow
-duckduckgo_search
+duckduckgo-search
