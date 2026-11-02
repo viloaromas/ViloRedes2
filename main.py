@@ -84,7 +84,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ Funcionamiento:\n1. Elige formato y envía tu foto con fondo blanco.\n2. La IA te ofrecerá 3 opciones de fondos tematizados.\n3. Selecciona tu fondo favorito para generar la imagen final."
+            text="ℹ️ Funcionamiento:\n1. Elige formato y envía tu foto.\n2. La IA te ofrecerá 3 opciones de fondos tematizados.\n3. Selecciona tu fondo favorito para generar la imagen final."
         )
         return
 
@@ -115,7 +115,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=chat_id, 
-        text="✅ Paso 2: Envía ahora la foto con fondo blanco de tu producto.",
+        text="✅ Paso 2: Envía ahora la foto (como foto o archivo) de tu producto con fondo blanco.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -132,7 +132,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=chat_id, text="🔍 Analizando el producto y diseñando opciones de ambientación...")
 
     try:
-        photo_file = await update.message.photo[-1].get_file()
+        # Detectar si se envió como foto o como documento/archivo
+        if update.message.photo:
+            photo_file = await update.message.photo[-1].get_file()
+        elif update.message.document:
+            photo_file = await update.message.document.get_file()
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se detectó ninguna imagen válida.")
+            return
+
         photo_bytes = await photo_file.download_as_bytearray()
         
         image = Image.open(io.BytesIO(photo_bytes))
@@ -163,7 +171,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Enviado sin parse_mode para evitar errores de formato en Telegram
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -246,8 +253,9 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    # Ahora acepta tanto fotos directas como imágenes enviadas como archivos/documentos
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot ajustado y en marcha sin errores de entidades!")
+    print("Bot ajustado para recibir fotos y documentos de imagen correctamente!")
     app.run_polling()
