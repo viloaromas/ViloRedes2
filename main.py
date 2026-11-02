@@ -6,6 +6,7 @@ import time
 import uuid
 import random
 import logging
+import asyncio
 import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -208,12 +209,10 @@ def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
 
 
 def remove_background_pure(product_image):
-    """Recorte limpio por umbral de color blanco para proteger etiquetas y envase sin consumir RAM."""
     source = product_image.convert("RGBA")
     datas = source.getdata()
     new_data = []
     for item in datas:
-        # Si el píxel es muy cercano al blanco puro, lo vuelve transparente
         if item[0] > 245 and item[1] > 245 and item[2] > 245:
             new_data.append((255, 255, 255, 0))
         else:
@@ -416,7 +415,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def asyncio_to_thread(func, *args, **kwargs):
-    import asyncio
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
@@ -535,7 +533,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-def main():
+async def main_async():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Falta configurar TELEGRAM_TOKEN.")
 
@@ -547,7 +545,21 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Bot de Vilo Aromas iniciado.")
-    app.run_polling(drop_pending_updates=True)
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    
+    # Mantener el hilo principal activo con el servidor web
+    while True:
+        await asyncio.sleep(3600)
+
+
+def main():
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":
