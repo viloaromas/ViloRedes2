@@ -1,7 +1,7 @@
 import os
 import logging
 import io
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageEnhance
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
@@ -10,7 +10,6 @@ import threading
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
-# Servidor web falso para mantener activo Render
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -47,33 +46,40 @@ def init_drive():
         logging.error(f"Error al inicializar Google Drive: {e}")
         return None
 
-# Función para generar la escena comercial integrada alrededor del producto
+# Función mejorada: Crea una escena inmersiva sin recuadros blancos extraños
 def componer_escena_comercial(input_path, output_path, ancho, alto, tipo_opcion):
     img_original = Image.open(input_path).convert("RGB")
     
-    # Crear fondo según el estilo elegido
+    # 1. Crear un fondo ambiental completo de alta gama según la opción
     fondo = Image.new("RGB", (ancho, alto))
+    if "1" in tipo_opcion:  # Botánico / Natural (Tonos verdes suaves y frescos)
+        fondo.paste((215, 235, 222), [0, 0, ancho, alto])
+    elif "2" in tipo_opcion:  # Living / Sala Elegante (Tonos madera clara / cálidos)
+        fondo.paste((238, 230, 218), [0, 0, ancho, alto])
+    else:  # Hogar Luminoso (Tonos crema / ámbar suave)
+        fondo.paste((248, 240, 228), [0, 0, ancho, alto])
+
+    # Aplicar un difuminado profundo para simular profundidad de campo de cámara profesional
+    fondo = fondo.filter(ImageFilter.GaussianBlur(50))
+
+    # 2. Escalar el producto para que ocupe una proporción elegante y protagonista (ej. 85% del alto total)
+    target_h = int(alto * 0.85)
+    aspect_ratio = img_original.width / img_original.height
+    target_w = int(target_h * aspect_ratio)
     
-    if "1" in tipo_opcion:  # Estilo Botánico / Natural (Tonos verdes suaves de estudio)
-        fondo.paste((230, 242, 235), [0, 0, ancho, alto])
-    elif "2" in tipo_opcion:  # Estilo Living / Mármol (Tonos cálidos y elegantes)
-        fondo.paste((246, 243, 238), [0, 0, ancho, alto])
-    else:  # Estilo Hogar / Luminoso (Tonos ámbar / crema)
-        fondo.paste((252, 246, 238), [0, 0, ancho, alto])
+    img_original = img_original.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # Difuminar el fondo para dar profundidad de campo profesional
-    fondo = fondo.filter(ImageFilter.GaussianBlur(20))
+    # 3. Calcular posición centrada inferior (para que repose de forma natural en la "superficie")
+    x_offset = (ancho - target_w) // 2
+    y_offset = alto - target_h - int(alto * 0.08)
 
-    # Redimensionar el producto manteniendo su proporción exacta (sin deformar)
-    max_w = int(ancho * 0.70)
-    max_h = int(alto * 0.70)
-    img_original.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
-
-    # Centrar el producto en la escena
-    x_offset = (ancho - img_original.width) // 2
-    y_offset = (alto - img_original.height) // 2
-
+    # Superponer directamente sobre el fondo ambiental difuminado (sin marcos blancos)
     fondo.paste(img_original, (x_offset, y_offset))
+    
+    # Añadir un realce sutil de brillo comercial
+    enhancer = ImageEnhance.Color(fondo)
+    fondo = enhancer.enhance(1.05)
+
     fondo.save(output_path, quality=95)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +118,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "Ayuda" in user_message:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="ℹ️ Funcionamiento:\n1. Elige el formato y envía tu foto de producto.\n2. La IA analizará la fragancia y te ofrecerá 3 opciones de ambientación.\n3. Elige tu favorita para generar la escena comercial lista."
+            text="ℹ️ Funcionamiento:\n1. Elige el formato y envía tu foto de producto.\n2. La IA analizará la fragancia y te ofrecerá opciones de ambientación.\n3. Elige tu favorita para generar la escena comercial lista."
         )
         return
 
@@ -169,9 +175,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['original_photo'] = original_path
 
         prompt_analisis = (
-            "Analiza este producto de Vilo Aromas (fragancia, tipo de envase). "
-            "Proporciona exactamente 3 opciones de escenarios de lifestyle comercial atractivos "
-            "(ejemplo: Opción 1: Entorno natural y botánico, Opción 2: Sala elegante con madera y luz cálida, Opción 3: Ambiente luminoso de hogar)."
+            "Analiza este producto de Vilo Aromas. "
+            "Proporciona exactamente 3 opciones de escenarios comerciales atractivos "
+            "(ejemplo: Opción 1: Entorno botánico y natural, Opción 2: Sala elegante con luz cálida, Opción 3: Hogar luminoso)."
         )
 
         response = model.generate_content([image, prompt_analisis])
@@ -205,7 +211,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data in ["escena_1", "escena_2", "escena_3"]:
         opcion_num = query.data.replace("escena_", "")
-        await query.edit_message_text(text=f"🎨 Generando escena comercial (Opción {opcion_num}) protegiendo etiquetas y producto...")
+        await query.edit_message_text(text=f"🎨 Generando escena comercial inmersiva (Opción {opcion_num})...")
 
         try:
             original_path = context.user_data.get('original_photo', 'temp_original.jpg')
@@ -228,8 +234,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=chat_id,
                     photo=open(final_path, 'rb'),
                     caption=(
-                        f"✨ **¡Escena comercial generada con éxito!**\n"
-                        f"*(Producto y etiquetas 100% protegidos)*\n\n"
+                        f"✨ **¡Escena comercial inmersiva generada!**\n"
+                        f"*(Sin recuadros blancos, producto 100% protegido)*\n\n"
                         f"¿Qué deseas hacer?"
                     ),
                     reply_markup=reply_markup_aprob
@@ -269,5 +275,6 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("Bot de Vilo Aromas estable y en marcha!")
+    print("Bot de Vilo Aromas con escenas inmersivas listo!")
     app.run_polling()
+                       
