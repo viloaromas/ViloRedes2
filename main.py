@@ -44,7 +44,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger("vilo_bot")
 
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "ViloAromasBot/4.0"})
+HTTP.headers.update({"User-Agent": "ViloAromasBot/4.1"})
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -87,37 +87,45 @@ def get_image_from_bytes(data):
 
 def identificar_producto(image):
     if not GEMINI_API_KEY:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
+        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus", "Saphirus aerosol"]}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = """
-Analiza la fotografía del producto. Lee la etiqueta con precisión (marca, tipo y fragancia).
-Devuelve SOLO JSON válido:
+Analiza la fotografía del producto. Lee la etiqueta con precisión (marca, tipo de producto y fragancia).
+Devuelve SOLO JSON válido con este formato estricto:
 {
   "name": "nombre exacto del producto",
-  "search_terms": ["consulta web 1", "consulta web 2"]
+  "search_terms": [
+    "marca + tipo + fragancia exacta",
+    "marca + tipo de producto",
+    "marca aromatizante"
+  ]
 }
 """
         response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
         match = re.search(r"\{.*\}", raw, flags=re.S)
         if not match:
-            return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
+            return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus", "Saphirus aerosol"]}
         data = json.loads(match.group(0))
         name = str(data.get("name") or "").strip() or "Producto Vilo Aromas"
-        terms = data.get("search_terms") or [name]
-        return {"name": name[:180], "search_terms": terms[:3]}
+        terms = data.get("search_terms") or [name, "Saphirus aerosol"]
+        return {"name": name[:180], "search_terms": terms[:5]}
     except Exception:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
+        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus", "Saphirus aerosol"]}
 
 
 def buscar_imagenes_web(search_terms):
     results = []
     seen = set()
-    for query in search_terms:
+    
+    # Consultas de respaldo en cascada para asegurar que encuentre resultados
+    queries_to_try = list(search_terms) + ["aromatizante Saphirus", "Saphirus aerosol ambiental"]
+
+    for query in queries_to_try:
         try:
             with DDGS() as ddgs:
-                found = list(ddgs.images(query=query, max_results=10))
+                found = list(ddgs.images(query=query, max_results=12))
             for item in found:
                 url = item.get("image")
                 if not url or url in seen:
@@ -184,7 +192,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["❓ Ayuda"],
     ]
     await update.message.reply_text(
-        "👋 ¡Hola! Bienvenido al asistente renovado de **Vilo Aromas**.\n\n"
+        "👋 ¡Hola! Bienvenido al asistente de **Vilo Aromas**.\n\n"
         "Envía una foto de tu producto para buscar imágenes comerciales exactas.",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         parse_mode="Markdown",
@@ -207,94 +215,3 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image = get_image_from_bytes(photo_bytes)
 
         await update.message.reply_text("🔎 Analizando etiqueta con Gemini...")
-        info = await asyncio.to_thread(identificar_producto, image)
-        
-        context.user_data["product_name"] = info["name"]
-        context.user_data["search_terms"] = info["search_terms"]
-
-        keyboard = [[InlineKeyboardButton("🌐 Buscar fotos en la Web", callback_data="buscar_web")]]
-        await update.message.reply_text(
-            f"✅ Producto detectado: *{info['name']}*",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    except Exception:
-        await update.message.reply_text("⚠️ Ocurrió un error al procesar la imagen.")
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    data = query.data
-
-    if data == "buscar_web":
-        await query.edit_message_text("🌐 Buscando imágenes comerciales en la web...")
-        terms = context.user_data.get("search_terms", ["aromatizante"])
-        results = await asyncio.to_thread(buscar_imagenes_web, terms)
-
-        if not results:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron imágenes en la web.")
-            return
-
-        context.user_data["web_results"] = results
-        for idx, (url, data_bytes) in enumerate(results):
-            img = get_image_from_bytes(data_bytes)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=90)
-            buf.seek(0)
-            buf.name = f"img_{idx}.jpg"
-
-            kb = [[InlineKeyboardButton(f"☁️ Guardar opción {idx + 1} en Drive", callback_data=f"save_{idx}")]]
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=buf,
-                caption=f"🖼️ Opción comercial {idx + 1}",
-                reply_markup=InlineKeyboardMarkup(kb),
-            )
-
-    elif data.startswith("save_"):
-        idx = int(data.replace("save_", ""))
-        results = context.user_data.get("web_results", [])
-        if 0 <= idx < len(results):
-            await query.edit_message_caption(caption="☁️ Guardando en Google Drive...")
-            _, data_bytes = results[idx]
-            img = get_image_from_bytes(data_bytes)
-            path = user_folder(chat_id) / f"web_{uuid.uuid4().hex[:6]}.jpg"
-            img.save(path, "JPEG", quality=92)
-
-            name_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", context.user_data.get("product_name", "prod"))[:25]
-            link = await asyncio.to_thread(guardar_en_drive, str(path), f"vilo_{name_clean}_{uuid.uuid4().hex[:4]}.jpg")
-            await context.bot.send_message(chat_id=chat_id, text=f"✅ ¡Guardado con éxito en Drive!\n{link}")
-
-
-async def main_async():
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError("Falta TELEGRAM_TOKEN.")
-
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
-    app.add_handler(CallbackQueryHandler(button_callback))
-
-    threading.Thread(target=run_web_server, daemon=True).start()
-
-    logger.info("Bot iniciado correctamente.")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    while True:
-        await asyncio.sleep(3600)
-
-
-def main():
-    try:
-        asyncio.run(main_async())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-
-
-if __name__ == "__main__":
-    main()
