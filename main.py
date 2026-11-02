@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
-from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+from PIL import Image, ImageOps, ImageFilter
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -37,7 +37,11 @@ try:
     from ddgs import DDGS
     DDGS_AVAILABLE = True
 except ImportError:
-    DDGS_AVAILABLE = False
+    try:
+        from duckduckgo_search import DDGS
+        DDGS_AVAILABLE = True
+    except ImportError:
+        DDGS_AVAILABLE = False
 
 # Segmentación local. Si no se puede cargar, el bot avisa y no destruye
 # el fondo original mediante un recorte por umbral de color.
@@ -104,13 +108,19 @@ BACKGROUND_CATALOG = {
         "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1600&q=90&fit=crop",
         "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1600&q=90&fit=crop",
     ],
+    "bano": ["https://images.unsplash.com/photo-1620626011761-996317b8d101?w=1600&q=90&fit=crop", "https://images.unsplash.com/photo-1600566753086-00f18fb6b3ea?w=1600&q=90&fit=crop"],
+    "dormitorio": ["https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?w=1600&q=90&fit=crop", "https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?w=1600&q=90&fit=crop"],
+    "natural": ["https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?w=1600&q=90&fit=crop", "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1600&q=90&fit=crop"],
 }
 
 STYLE_LABELS = {
-    "blanco": "Catálogo fondo blanco",
-    "lifestyle": "Lifestyle / ambiente real",
-    "premium": "Fondo premium",
-    "publicidad": "Imagen para publicidad",
+    "lifestyle": "Lifestyle: living / hogar",
+    "bano": "Baño elegante / spa",
+    "dormitorio": "Dormitorio cálido",
+    "natural": "Natural / botánico",
+    "premium": "Premium / mármol y detalles finos",
+    "publicidad": "Publicidad para redes",
+    "blanco": "Catálogo fondo blanco (opcional)",
 }
 
 HTTP = requests.Session()
@@ -180,19 +190,32 @@ def save_original_image(image, user_id):
 # ---------------------------------------------------------------------
 
 def identificar_producto(image):
+    """Lee la etiqueta y devuelve datos estructurados sin inventar información."""
     if not genai_client:
-        return "Producto de limpieza o aromatización"
-    prompt = (
-        "Analiza esta fotografía de producto. Lee únicamente lo que sea visible "
-        "en el envase y la etiqueta. Identifica marca, línea y fragancia si se "
-        "pueden leer. No inventes datos. Devuelve una sola línea breve. "
-        "Si no se distingue, responde 'Producto sin identificar'."
-    )
-    response = genai_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[image, prompt],
-    )
-    return (response.text or "Producto sin identificar").strip()[:250]
+        return {"name": "Producto de limpieza o aromatización", "brand": "", "line": "", "scent": "", "type": "producto de aromatización", "search_terms": ["producto de aromatización"]}
+    prompt = """
+Analiza la fotografía y lee únicamente lo que realmente se distingue en el envase.
+No adivines marcas, fragancias ni palabras borrosas. Devuelve SOLO JSON válido:
+{"name":"nombre exacto visible","brand":"marca o vacío","line":"línea o vacío","scent":"fragancia o vacío","type":"tipo de producto","search_terms":["3 a 5 consultas para encontrar fotos del mismo producto"]}
+Las búsquedas deben priorizar marca + línea + fragancia y el nombre exacto. No propongas productos similares.
+"""
+    response = genai_client.models.generate_content(model=GEMINI_MODEL, contents=[image, prompt])
+    raw=(response.text or "").strip()
+    try:
+        m=re.search(r"\{.*\}", raw, flags=re.S)
+        data=json.loads(m.group(0) if m else raw)
+        brand=str(data.get("brand") or "").strip(); line=str(data.get("line") or "").strip()
+        scent=str(data.get("scent") or "").strip(); typ=str(data.get("type") or "producto de aromatización").strip()
+        name=str(data.get("name") or "").strip() or " ".join(x for x in (brand,line,scent,typ) if x)
+        terms=data.get("search_terms") or []
+        if not isinstance(terms,list): terms=[]
+        terms=[str(x).strip() for x in terms if str(x).strip()]
+        if not terms: terms=[" ".join(x for x in (brand,line,scent) if x), name]
+        return {"name":(name or "Producto sin identificar")[:180],"brand":brand[:80],"line":line[:80],"scent":scent[:80],"type":typ[:100],"search_terms":terms[:5]}
+    except Exception:
+        logger.warning("Gemini no devolvió JSON de identificación; se usa el texto como nombre.")
+        name=raw.replace("```json","").replace("```","").strip()[:180] or "Producto sin identificar"
+        return {"name":name,"brand":"","line":"","scent":"","type":"producto de aromatización","search_terms":[name]}
 
 
 def redactar_copy(user_message):
@@ -216,59 +239,40 @@ def redactar_copy(user_message):
 # BÚSQUEDA WEB DE IMÁGENES
 # ---------------------------------------------------------------------
 
-def buscar_imagenes_web(nombre_producto, max_resultados=4):
-    """Busca imágenes, descarga y valida cada archivo antes de enviarlo."""
+def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
+    """Busca fotos del producto identificado; descarga y valida los archivos antes de Telegram."""
     if not DDGS_AVAILABLE:
         logger.warning("El paquete ddgs no está disponible.")
         return []
-
-    queries = [
-        f'"{nombre_producto}"',
-        f"{nombre_producto} aromatizante",
-        f"{nombre_producto} producto envase",
-    ]
-    resultados = []
-    vistos = set()
-
-    for query_text in queries:
+    queries=[]
+    for term in (search_terms or []):
+        term=str(term).strip()
+        if term and term not in queries: queries.append(term)
+    if nombre_producto:
+        for term in (f'"{nombre_producto}"', f"{nombre_producto} envase producto", f"{nombre_producto} foto producto"):
+            if term not in queries: queries.append(term)
+    results=[]; seen=set()
+    for query_text in queries[:8]:
         try:
             with DDGS() as ddgs:
-                encontrados = ddgs.images(
-                    query=query_text,
-                    max_results=12,
-                    safesearch="moderate",
-                )
-            for item in encontrados:
-                url = item.get("image") or item.get("thumbnail")
-                if not url or url in vistos:
-                    continue
-                vistos.add(url)
+                found=list(ddgs.images(query=query_text, max_results=15, safesearch="moderate"))
+            for item in found:
+                url=item.get("image")
+                if not url or url in seen: continue
+                seen.add(url)
                 try:
-                    response = HTTP.get(url, timeout=(5, 15), stream=True)
-                    response.raise_for_status()
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    if "image" not in content_type:
-                        response.close()
-                        continue
-
-                    data = response.content
-                    response.close()
-                    if len(data) < 5_000 or len(data) > 15_000_000:
-                        continue
-
-                    image = Image.open(io.BytesIO(data))
-                    image.verify()
-                    # Guardamos bytes originales validados.
-                    resultados.append((url, data))
-                    if len(resultados) >= max_resultados:
-                        return resultados
+                    response=HTTP.get(url, timeout=(6,18), headers={"Referer":item.get("url","")})
+                    response.raise_for_status(); data=response.content
+                    if "image" not in response.headers.get("Content-Type","").lower() or not (5000 <= len(data) <= 15000000): continue
+                    im=Image.open(io.BytesIO(data)); im.verify()
+                    results.append((url,data))
+                    if len(results)>=max_resultados: return results
                 except Exception as exc:
-                    logger.info("Se descartó una imagen web: %s", exc)
+                    logger.info("Imagen web descartada: %s", exc)
         except Exception as exc:
-            logger.warning("Falló la búsqueda DDGS para '%s': %s", query_text, exc)
-            time.sleep(0.5)
-
-    return resultados
+            logger.warning("Falló DDGS para '%s': %s", query_text, exc)
+            time.sleep(0.7)
+    return results
 
 
 # ---------------------------------------------------------------------
@@ -296,13 +300,22 @@ def remove_background(product_image):
             "en requirements.txt y volvé a desplegar."
         )
 
+    # La IA se usa exclusivamente para calcular la máscara de recorte.
+    # Los canales RGB finales se recuperan SIEMPRE de la foto original:
+    # así no se recolorean ni regeneran etiqueta, líquido, marca o envase.
     source = product_image.convert("RGBA")
     result = remove(
         source,
         session=get_rembg_session(),
         alpha_matting=False,
     )
-    cutout = result.convert("RGBA")
+    mask = result.convert("RGBA").getchannel("A")
+
+    # Reaplicar la máscara sobre los píxeles RGB originales.
+    # Esto evita que la segmentación cambie los colores del producto.
+    original_rgb = source.convert("RGB")
+    cutout = original_rgb.convert("RGBA")
+    cutout.putalpha(mask)
 
     alpha = cutout.getchannel("A")
     bbox = alpha.getbbox()
@@ -331,83 +344,60 @@ def download_background(url):
     return ImageOps.exif_transpose(image).convert("RGB")
 
 
-def buscar_fondo_pexels(style, orientation="square"):
-    """Busca fondos en Pexels si se configuró PEXELS_API_KEY."""
-    if not PEXELS_API_KEY:
-        return None
-
-    terms = {
-        "lifestyle": "minimalist modern living room interior",
-        "premium": "luxury marble beige interior surface",
-        "publicidad": "elegant neutral home interior product background",
-        "blanco": "white studio photography background",
+def buscar_fondo_pexels(style, product_info=None, orientation="square"):
+    """Busca un ambiente acorde al estilo y a la fragancia/tipo detectados."""
+    if not PEXELS_API_KEY: return None
+    info=product_info or {}; scent=(info.get("scent") or "").lower(); typ=(info.get("type") or "").lower()
+    style_terms={
+        "lifestyle":"elegant modern living room neutral home interior",
+        "bano":"luxury spa bathroom marble counter eucalyptus towels",
+        "dormitorio":"warm cozy bedroom bedside table soft natural light",
+        "natural":"fresh botanical green plants sunlight natural stone interior",
+        "premium":"luxury beige marble travertine gold details interior",
+        "publicidad":"premium minimalist advertising set design",
+        "blanco":"clean white studio tabletop product photography background",
     }
+    scent_terms={"mango":"subtle tropical mango fruit botanical styling","maracuya":"passion fruit tropical botanical styling","cítrico":"citrus lemon orange fresh styling","citrico":"citrus lemon orange fresh styling","lavanda":"lavender flowers soft botanical styling","vainilla":"vanilla beige warm cozy styling","floral":"soft flowers botanical styling"}
+    extra=next((v for k,v in scent_terms.items() if k in scent),"")
+    if any(w in typ for w in ("textil","tela","ropa")): extra += " fresh linen fabric styling"
+    query_text=" ".join(x for x in (style_terms.get(style,style_terms["lifestyle"]),extra) if x)
     try:
-        response = HTTP.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": PEXELS_API_KEY},
-            params={
-                "query": terms.get(style, terms["lifestyle"]),
-                "per_page": 10,
-                "orientation": orientation,
-            },
-            timeout=(5, 20),
-        )
-        response.raise_for_status()
-        photos = response.json().get("photos", [])
-        if not photos:
-            return None
-        photo = random.choice(photos)
-        src = photo.get("src", {})
-        url = src.get("large2x") or src.get("large")
+        r=HTTP.get("https://api.pexels.com/v1/search",headers={"Authorization":PEXELS_API_KEY},params={"query":query_text,"per_page":12,"orientation":orientation},timeout=(6,20))
+        r.raise_for_status(); photos=r.json().get("photos",[])
+        if not photos: return None
+        src=random.choice(photos).get("src",{}); url=src.get("large2x") or src.get("large")
         return download_background(url) if url else None
     except Exception:
-        logger.exception("No se pudo obtener un fondo de Pexels.")
+        logger.exception("No se pudo obtener un fondo contextual de Pexels.")
         return None
 
 
-def obtener_fondo(style, size=(1080, 1080)):
-    # Primero Pexels (si hay API key); luego fondos curados de respaldo.
-    background = buscar_fondo_pexels(style)
+def obtener_fondo(style, size=(1080,1080), product_info=None):
+    background=buscar_fondo_pexels(style, product_info=product_info)
     if background is None:
-        urls = BACKGROUND_CATALOG.get(style, BACKGROUND_CATALOG["lifestyle"])
-        for url in random.sample(urls, len(urls)):
-            try:
-                background = download_background(url)
-                break
-            except Exception:
-                logger.warning("No se pudo descargar un fondo: %s", url)
-
-    if background is None:
-        # Fondo neutro de emergencia, nunca altera el producto.
-        background = Image.new("RGB", size, (242, 240, 235))
-
-    if style == "blanco":
-        background = Image.new("RGB", size, (250, 250, 250))
+        urls=BACKGROUND_CATALOG.get(style, BACKGROUND_CATALOG.get("lifestyle",[]))
+        for url in random.sample(urls,len(urls)) if urls else []:
+            try: background=download_background(url); break
+            except Exception: logger.warning("No se pudo descargar un fondo: %s",url)
+    if background is None: background=Image.new("RGB",size,(239,236,229))
+    if style=="blanco": background=Image.new("RGB",size,(250,250,250))
     else:
-        # Recorte centrado a 1:1 para la publicación.
-        bg_ratio = background.width / background.height
-        target_ratio = size[0] / size[1]
-        if bg_ratio > target_ratio:
-            new_width = int(background.height * target_ratio)
-            left = (background.width - new_width) // 2
-            background = background.crop((left, 0, left + new_width, background.height))
+        ratio=background.width/background.height; target=size[0]/size[1]
+        if ratio>target:
+            w=int(background.height*target); left=(background.width-w)//2; background=background.crop((left,0,left+w,background.height))
         else:
-            new_height = int(background.width / target_ratio)
-            top = (background.height - new_height) // 2
-            background = background.crop((0, top, background.width, top + new_height))
-
-    return background.resize(size, Image.Resampling.LANCZOS).convert("RGBA")
+            h=int(background.width/target); top=(background.height-h)//2; background=background.crop((0,top,background.width,top+h))
+    return background.resize(size,Image.Resampling.LANCZOS).convert("RGBA")
 
 
-def compose_product_scene(original_image, style):
+def compose_product_scene(original_image, style, product_info=None):
     """
     Recorta el fondo con segmentación, pero pega los píxeles originales del
     producto. La etiqueta/envase no se vuelven a generar ni se redibujan.
     """
     product = remove_background(original_image)
     canvas_size = (1080, 1080)
-    background = obtener_fondo(style, canvas_size)
+    background = obtener_fondo(style, canvas_size, product_info=product_info)
 
     max_height = 760 if style != "blanco" else 820
     max_width = 650
@@ -436,11 +426,8 @@ def compose_product_scene(original_image, style):
     # El producto original segmentado se coloca por encima de la sombra.
     background.alpha_composite(product, (x, y))
 
-    final = background.convert("RGB")
-    if style == "blanco":
-        # Mantiene blanco puro y una sombra natural debajo del producto.
-        final = ImageEnhance.Contrast(final).enhance(1.02)
-    return final
+    # Sin filtros globales: no alterar colores del envase, líquido ni etiqueta.
+    return background.convert("RGB")
 
 
 # ---------------------------------------------------------------------
@@ -516,11 +503,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mostrar_menu_principal(context, chat_id, product_name):
     keyboard = [
-        [InlineKeyboardButton("🌐 Buscar fotos comerciales en la Web", callback_data="modo_web")],
-        [InlineKeyboardButton("📷 Catálogo: fondo blanco", callback_data="estilo_blanco")],
-        [InlineKeyboardButton("🏡 Lifestyle: ambientes reales", callback_data="estilo_lifestyle")],
-        [InlineKeyboardButton("✨ Fondo premium", callback_data="estilo_premium")],
-        [InlineKeyboardButton("📢 Imagen para publicidad", callback_data="estilo_publicidad")],
+        [InlineKeyboardButton("🌐 Buscar fotos de ESTE producto en la Web", callback_data="modo_web")],
+        [InlineKeyboardButton("🏡 Living / hogar", callback_data="estilo_lifestyle")],
+        [InlineKeyboardButton("🛁 Baño elegante / spa", callback_data="estilo_bano")],
+        [InlineKeyboardButton("🛏️ Dormitorio cálido", callback_data="estilo_dormitorio")],
+        [InlineKeyboardButton("🌿 Natural / botánico", callback_data="estilo_natural")],
+        [InlineKeyboardButton("✨ Premium / mármol", callback_data="estilo_premium")],
+        [InlineKeyboardButton("📢 Publicidad para redes", callback_data="estilo_publicidad")],
+        [InlineKeyboardButton("⬜ Fondo blanco (opcional)", callback_data="estilo_blanco")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ]
     await context.bot.send_message(
@@ -598,14 +588,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("🔎 Analizando el producto...")
         try:
-            product_name = await asyncio_to_thread(identificar_producto, image)
+            product_info = await asyncio_to_thread(identificar_producto, image)
         except Exception:
             logger.exception("No se pudo identificar el producto.")
-            product_name = "Producto sin identificar"
-
-        context.user_data["product_name"] = product_name
+            product_info = {"name":"Producto sin identificar","brand":"","line":"","scent":"","type":"producto de aromatización","search_terms":[]}
+        context.user_data["product_info"] = product_info
+        context.user_data["product_name"] = product_info.get("name", "Producto sin identificar")
+        context.user_data["search_terms"] = product_info.get("search_terms", [])
         context.user_data["awaiting_photo"] = False
-        await mostrar_menu_principal(context, chat_id, product_name)
+        await mostrar_menu_principal(context, chat_id, context.user_data["product_name"])
 
     except Exception as exc:
         logger.exception("Error procesando la foto.")
@@ -655,15 +646,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "modo_web" or data == "buscar_mas_web":
         await query.edit_message_text("🌐 Buscando imágenes comerciales en la web...")
         product_name = context.user_data.get("product_name", "aromatizante")
-        results = await asyncio_to_thread(buscar_imagenes_web, product_name, 4)
+        search_terms = context.user_data.get("search_terms", [])
+        results = await asyncio_to_thread(buscar_imagenes_web, product_name, 4, search_terms)
 
         if not results:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "⚠️ No pude obtener imágenes web en esta búsqueda.\n"
-                    "Puede ser una limitación temporal del buscador o de los sitios de origen. "
-                    "Probá nuevamente en unos minutos o usá los fondos profesionales."
+                    "⚠️ No pude descargar fotos de este producto en esta búsqueda.\n"
+                    "La búsqueda usa la marca, línea y fragancia que pudo leer en la etiqueta. "
+                    "Si no las reconoce bien, escribime el nombre exacto y vuelvo a buscar."
                 ),
             )
         else:
@@ -699,7 +691,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             original = Image.open(original_path).convert("RGBA")
-            final_image = await asyncio_to_thread(compose_product_scene, original, style)
+            product_info = context.user_data.get("product_info", {})
+            final_image = await asyncio_to_thread(compose_product_scene, original, style, product_info)
             final_path = str(user_folder(update.effective_user.id) / f"vilo_{style}_{uuid.uuid4().hex[:8]}.jpg")
             final_image.save(final_path, "JPEG", quality=95, optimize=True)
             context.user_data["pending_photo"] = final_path
@@ -715,8 +708,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=photo,
                     caption=(
                         f"✨ {STYLE_LABELS[style]} listo.\n\n"
-                        "El producto se tomó de tu fotografía original; no se regeneró con IA.\n"
-                        "Revisá especialmente los bordes y la etiqueta antes de aprobar."
+                        "Los colores RGB del producto se conservan desde tu foto original; la IA solo calcula la máscara para separar el fondo.\n"
+                        "Solo se segmenta para ubicarlo en el ambiente. Revisá bordes, transparencia y etiqueta antes de aprobar."
                     ),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
