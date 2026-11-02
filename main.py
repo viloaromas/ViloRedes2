@@ -4,7 +4,6 @@ import re
 import json
 import time
 import uuid
-import random
 import logging
 import asyncio
 import threading
@@ -12,7 +11,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import requests
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -61,29 +60,6 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-BACKGROUND_CATALOG = {
-    "lifestyle": [
-        "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1600&q=90&fit=crop",
-        "https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?w=1600&q=90&fit=crop",
-    ],
-    "premium": [
-        "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?w=1600&q=90&fit=crop",
-        "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1600&q=90&fit=crop",
-    ],
-    "bano": ["https://images.unsplash.com/photo-1620626011761-996317b8d101?w=1600&q=90&fit=crop"],
-    "dormitorio": ["https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?w=1600&q=90&fit=crop"],
-    "natural": ["https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?w=1600&q=90&fit=crop"],
-}
-
-STYLE_LABELS = {
-    "blanco": "Fondo blanco limpio (Catálogo)",
-    "lifestyle": "Lifestyle: living / hogar",
-    "bano": "Baño elegante / spa",
-    "dormitorio": "Dormitorio cálido",
-    "natural": "Natural / botánico",
-    "premium": "Premium / mármol y detalles finos",
-}
-
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "ViloAromasBot/2.0"})
 
@@ -118,11 +94,6 @@ def user_folder(user_id):
     return folder
 
 
-def safe_filename(value):
-    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value or "producto")
-    return value[:50].strip("_") or "producto"
-
-
 def get_image_from_bytes(data):
     image = Image.open(io.BytesIO(data))
     image = ImageOps.exif_transpose(image)
@@ -131,20 +102,15 @@ def get_image_from_bytes(data):
     return image
 
 
-def save_original_image(image, user_id):
-    path = user_folder(user_id) / f"original_{uuid.uuid4().hex[:8]}.png"
-    image.save(path, format="PNG")
-    return str(path)
-
-
 def identificar_producto(image):
     if not GEMINI_API_KEY:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["vilo aromas"]}
+        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = """
-Analiza la fotografía y lee el envase. Devuelve SOLO JSON válido:
-{"name":"nombre exacto visible","search_terms":["3 consultas para buscar fotos en la web"]}
+Analiza detalladamente la fotografía y lee con precisión el texto exacto de la etiqueta (marca, línea, tipo y fragancia exacta, por ejemplo: 'Saphirus Bergamota y Naranja' o 'Saphirus Linah'). 
+Devuelve SOLO JSON válido con este formato estricto:
+{"name":"nombre exacto completo","search_terms":["consulta precisa 1", "consulta precisa 2"]}
 """
         response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
@@ -154,7 +120,7 @@ Analiza la fotografía y lee el envase. Devuelve SOLO JSON válido:
         terms = data.get("search_terms") or [name]
         return {"name": name[:180], "search_terms": terms[:5]}
     except Exception:
-        return {"name": "Producto Vilo Aromas", "search_terms": ["vilo aromas"]}
+        return {"name": "Producto Vilo Aromas", "search_terms": ["aromatizante Saphirus"]}
 
 
 def redactar_copy(user_message):
@@ -171,20 +137,13 @@ def redactar_copy(user_message):
     return (response.text or "No pude generar el texto.").strip()
 
 
-def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
+def buscar_imagenes_web(search_terms, max_resultados=4):
     if not DDGS_AVAILABLE:
         return []
-    queries = []
-    for term in (search_terms or []):
-        term = str(term).strip()
-        if term and term not in queries:
-            queries.append(term)
-    if nombre_producto:
-        queries.append(nombre_producto)
-
+    
     results = []
     seen = set()
-    for query_text in queries[:5]:
+    for query_text in search_terms:
         try:
             with DDGS() as ddgs:
                 found = list(ddgs.images(query=query_text, max_results=10))
@@ -204,87 +163,8 @@ def buscar_imagenes_web(nombre_producto, max_resultados=4, search_terms=None):
                 except Exception:
                     pass
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.3)
     return results
-
-
-def remove_background_pure(product_image):
-    source = product_image.convert("RGBA")
-    datas = source.getdata()
-    new_data = []
-    for item in datas:
-        if item[0] > 242 and item[1] > 242 and item[2] > 242:
-            new_data.append((255, 255, 255, 0))
-        else:
-            new_data.append(item)
-    source.putdata(new_data)
-    bbox = source.getbbox()
-    if not bbox:
-        return source
-    return source.crop(bbox)
-
-
-def download_background(url):
-    response = HTTP.get(url, timeout=(6, 15))
-    response.raise_for_status()
-    image = Image.open(io.BytesIO(response.content))
-    return ImageOps.exif_transpose(image).convert("RGB")
-
-
-def obtener_fondo(style, size=(1080, 1080)):
-    if style == "blanco":
-        return Image.new("RGB", size, (255, 255, 255)).convert("RGBA")
-    
-    background = None
-    urls = BACKGROUND_CATALOG.get(style, BACKGROUND_CATALOG.get("lifestyle", []))
-    for url in (random.sample(urls, len(urls)) if urls else []):
-        try:
-            background = download_background(url)
-            break
-        except Exception:
-            pass
-
-    if background is None:
-        background = Image.new("RGB", size, (239, 236, 229))
-
-    return background.resize(size, Image.Resampling.LANCZOS).convert("RGBA")
-
-
-def compose_product_scene(original_image, style):
-    product = remove_background_pure(original_image)
-    canvas_size = (1080, 1080)
-    background = obtener_fondo(style, canvas_size)
-
-    max_height = 620 if style != "blanco" else 820
-    max_width = 520 if style != "blanco" else 750
-    scale = min(max_width / product.width, max_height / product.height, 1.0)
-    new_size = (
-        max(1, int(product.width * scale)),
-        max(1, int(product.height * scale)),
-    )
-    product = product.resize(new_size, Image.Resampling.LANCZOS)
-
-    x = (canvas_size[0] - product.width) // 2
-    
-    if style == "blanco":
-        # Centrado perfecto para tienda online
-        y = (canvas_size[1] - product.height) // 2
-        background.alpha_composite(product, (x, y))
-    else:
-        # Apoyado de manera realista sobre la superficie en escenas lifestyle
-        y = canvas_size[1] - product.height - 130
-        alpha = product.getchannel("A")
-        shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(16))
-        shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.35))
-        shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
-        shadow.putalpha(shadow_alpha)
-
-        shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-        shadow_layer.alpha_composite(shadow, (x + 12, y + product.height - 25))
-        background = Image.alpha_composite(background, shadow_layer)
-        background.alpha_composite(product, (x, y))
-
-    return background.convert("RGB")
 
 
 def init_drive():
@@ -329,33 +209,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "¡hola!"
     keyboard = [
         ["📸 Enviar Foto de Producto"],
-        ["📝 Redactar Copy (Story / Reel / Post)"],
+        ["📝 Redactar Copy para Redes"],
         ["❓ Ayuda / Estado"],
     ]
     await update.message.reply_text(
         f"¡Hola {user_name}! 👋 Bienvenido al asistente de Vilo Aromas.\n\n"
-        "Podés enviarme una foto de producto o pedirme un texto para tus redes.",
+        "Envía una foto de tu producto para buscar imágenes comerciales exactas en la web y guardarlas en Drive.",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
 
 
 async def mostrar_menu_principal(context, chat_id, product_name):
     keyboard = [
-        [InlineKeyboardButton("🌐 Buscar fotos comerciales en la Web", callback_data="modo_web")],
-        [InlineKeyboardButton("⬜ Fondo blanco limpio (Catálogo)", callback_data="estilo_blanco")],
-        [InlineKeyboardButton("🏡 Living / hogar", callback_data="estilo_lifestyle")],
-        [InlineKeyboardButton("🛁 Baño elegante / spa", callback_data="estilo_bano")],
-        [InlineKeyboardButton("🛏️ Dormitorio cálido", callback_data="estilo_dormitorio")],
-        [InlineKeyboardButton("🌿 Natural / botánico", callback_data="estilo_natural")],
-        [InlineKeyboardButton("✨ Premium / mármol", callback_data="estilo_premium")],
+        [InlineKeyboardButton("🌐 Buscar fotos comerciales exactas en la Web", callback_data="modo_web")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ]
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"✅ Foto recibida y analizada\n"
-            f"🔎 Producto detectado: *{product_name}*\n\n"
-            "Elegí qué acción querés realizar:"
+            f"✅ Foto analizada con éxito\n"
+            f"🔎 Producto exacto detectado: *{product_name}*\n\n"
+            "👉 Haz clic abajo para buscar fotos comerciales de este producto:"
         ),
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -370,7 +244,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "Enviar Foto" in user_message:
         await update.message.reply_text(
-            "✅ Enviá ahora la foto de tu producto.",
+            "✅ Envía ahora la foto de tu producto.",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
@@ -378,9 +252,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "Ayuda" in user_message or user_message == "/help":
         await update.message.reply_text(
             "ℹ️ Cómo usar el bot:\n"
-            "1. Tocá Enviar Foto de Producto.\n"
-            "2. Mandá una foto nítida de tu envase.\n"
-            "3. Elegí fondo blanco para tu tienda o buscar fotos comerciales en la web."
+            "1. Envía una foto clara de tu producto.\n"
+            "2. El bot leerá la etiqueta exacta y buscará fotos comerciales en la web.\n"
+            "3. Guarda la imagen seleccionada directamente en tu Google Drive."
         )
         return
 
@@ -394,7 +268,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
 
     try:
         if update.message.photo:
@@ -407,10 +280,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         photo_bytes = await photo_file.download_as_bytearray()
         image = get_image_from_bytes(photo_bytes)
-        original_path = save_original_image(image, user_id)
-        context.user_data["original_photo"] = original_path
 
-        await update.message.reply_text("🔎 Analizando el producto...")
+        await update.message.reply_text("🔎 Leyendo etiqueta y fragancia exacta con Gemini...")
         product_info = await asyncio_to_thread(identificar_producto, image)
         context.user_data["product_info"] = product_info
         context.user_data["product_name"] = product_info.get("name", "Producto Vilo Aromas")
@@ -442,7 +313,7 @@ async def enviar_imagenes_web(context, chat_id, urls_and_bytes):
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=buffer,
-                caption=f"🖼️ Resultado web {index}",
+                caption=f"🖼️ Foto comercial encontrada {index}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
@@ -456,87 +327,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data or ""
 
     if data == "modo_web" or data == "buscar_mas_web":
-        await query.edit_message_text("🌐 Buscando imágenes comerciales en la web...")
-        product_name = context.user_data.get("product_name", "aromatizante")
-        search_terms = context.user_data.get("search_terms", [])
-        results = await asyncio_to_thread(buscar_imagenes_web, product_name, 4, search_terms)
+        await query.edit_message_text("🌐 Buscando fotos comerciales exactas en la web...")
+        search_terms = context.user_data.get("search_terms", ["aromatizante Saphirus"])
+        results = await asyncio_to_thread(buscar_imagenes_web, search_terms, 4)
 
         if not results:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron fotos web para este producto.")
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ No se encontraron fotos exactas en la web para este producto.")
         else:
             context.user_data["web_results"] = results
             await enviar_imagenes_web(context, chat_id, results)
 
         keyboard = [
             [InlineKeyboardButton("🔄 Buscar más resultados", callback_data="buscar_mas_web")],
-            [InlineKeyboardButton("🔙 Volver al menú", callback_data="volver_menu")],
+            [InlineKeyboardButton("🔙 Volver al inicio", callback_data="cancelar")],
         ]
-        await context.bot.send_message(chat_id=chat_id, text="¿Qué querés hacer ahora?", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    if data.startswith("estilo_"):
-        style = data.replace("estilo_", "", 1)
-        original_path = context.user_data.get("original_photo")
-        if not original_path or not os.path.exists(original_path):
-            await query.edit_message_text("⚠️ No encuentro la foto original. Enviá nuevamente el producto.")
-            return
-
-        context.user_data["last_style"] = style
-        await query.edit_message_text(f"🎨 Preparando {STYLE_LABELS.get(style, 'escena')}...")
-        try:
-            original = Image.open(original_path).convert("RGBA")
-            final_image = await asyncio_to_thread(compose_product_scene, original, style)
-            final_path = str(user_folder(update.effective_user.id) / f"vilo_{style}_{uuid.uuid4().hex[:8]}.jpg")
-            final_image.save(final_path, "JPEG", quality=95, optimize=True)
-            context.user_data["pending_photo"] = final_path
-
-            keyboard = [
-                [InlineKeyboardButton("✅ Aprobar y guardar en Drive", callback_data="save_drive_escena")],
-                [InlineKeyboardButton("🔄 Probar otro estilo", callback_data="volver_menu")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
-            ]
-            with open(final_path, "rb") as photo:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=f"✨ Estilo *{STYLE_LABELS.get(style, '')}* listo.",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown",
-                )
-        except Exception as exc:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No pude crear la composición: {exc}")
-        return
-
-    if data == "volver_menu":
-        product_name = context.user_data.get("product_name", "Producto Vilo Aromas")
-        await mostrar_menu_principal(context, chat_id, product_name)
+        await context.bot.send_message(chat_id=chat_id, text="¿Qué deseas hacer a continuación?", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("save_web_"):
         index = int(data.replace("save_web_", ""))
         results = context.user_data.get("web_results", [])
         if 0 <= index < len(results):
-            await query.edit_message_caption(caption="☁️ Guardando imagen web en Google Drive...")
+            await query.edit_message_caption(caption="☁️ Guardando imagen en Google Drive...")
             _, data_bytes = results[index]
-            path = str(user_folder(update.effective_user.id) / f"web_{uuid.uuid4().hex[:8]}.jpg")
+            path = str(user_folder(chat_id) / f"web_{uuid.uuid4().hex[:8]}.jpg")
             image = get_image_from_bytes(data_bytes).convert("RGB")
             image.save(path, "JPEG", quality=94)
-            link = await asyncio_to_thread(guardar_en_drive, path, f"vilo_web_{uuid.uuid4().hex[:6]}.jpg")
-            await context.bot.send_message(chat_id=chat_id, text=f"✅ Imagen guardada en Google Drive.\n{link}")
-        return
-
-    if data == "save_drive_escena":
-        path = context.user_data.get("pending_photo")
-        if path and os.path.exists(path):
-            await query.edit_message_caption(caption="☁️ Subiendo escena a Google Drive...")
-            product = safe_filename(context.user_data.get("product_name", "producto"))
-            style = safe_filename(context.user_data.get("last_style", "vilo"))
-            link = await asyncio_to_thread(guardar_en_drive, path, f"vilo_{product}_{style}_{uuid.uuid4://hex[:6]}.jpg")
-            await context.bot.send_message(chat_id=chat_id, text=f"🚀 Imagen guardada en Google Drive.\n{link}")
+            
+            product_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", context.user_data.get("product_name", "producto"))[:30]
+            link = await asyncio_to_thread(guardar_en_drive, path, f"vilo_{product_clean}_{uuid.uuid4().hex[:6]}.jpg")
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ ¡Imagen guardada con éxito en Google Drive!\n{link}")
         return
 
     if data == "cancelar":
-        await query.edit_message_text("Operación cancelada. Podés comenzar nuevamente con /start.")
+        await query.edit_message_text("Operación cancelada. Envía una nueva foto cuando gustes con /start.")
         context.user_data.clear()
         return
 
