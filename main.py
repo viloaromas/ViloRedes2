@@ -61,10 +61,11 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# Fondos profesionales con superficies de apoyo claras (mesas, encimeras, muebles bajos)
 BACKGROUND_CATALOG = {
     "lifestyle": [
         "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1600&q=90&fit=crop",
-        "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1600&q=90&fit=crop",
+        "https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?w=1600&q=90&fit=crop",
     ],
     "premium": [
         "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?w=1600&q=90&fit=crop",
@@ -213,7 +214,7 @@ def remove_background_pure(product_image):
     datas = source.getdata()
     new_data = []
     for item in datas:
-        if item[0] > 245 and item[1] > 245 and item[2] > 245:
+        if item[0] > 242 and item[1] > 242 and item[2] > 242:
             new_data.append((255, 255, 255, 0))
         else:
             new_data.append(item)
@@ -255,8 +256,9 @@ def compose_product_scene(original_image, style):
     canvas_size = (1080, 1080)
     background = obtener_fondo(style, canvas_size)
 
-    max_height = 760 if style != "blanco" else 820
-    max_width = 650
+    # Escalar proporcionalmente para que el producto tenga un tamaño comercial armónico
+    max_height = 620 if style != "blanco" else 750
+    max_width = 520
     scale = min(max_width / product.width, max_height / product.height, 1.0)
     new_size = (
         max(1, int(product.width * scale)),
@@ -264,17 +266,21 @@ def compose_product_scene(original_image, style):
     )
     product = product.resize(new_size, Image.Resampling.LANCZOS)
 
+    # Generar sombra de contacto realista bajo el producto
     alpha = product.getchannel("A")
-    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(20))
-    shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.25))
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(16))
+    shadow_alpha = shadow_alpha.point(lambda p: int(p * 0.35))
     shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
     shadow.putalpha(shadow_alpha)
 
+    # POSICIONAMIENTO LÓGICO: Ubicado firmemente apoyado sobre la superficie inferior de la escena
     x = (canvas_size[0] - product.width) // 2
-    y = canvas_size[1] - product.height - 110
+    # El eje Y se ajusta para que la base del envase apoye contra el tercio inferior del fondo (zona de muebles/mesas)
+    y = canvas_size[1] - product.height - 130
 
     shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-    shadow_layer.alpha_composite(shadow, (x + 8, y + 14))
+    # Sombra proyectada detrás y debajo de la base del producto
+    shadow_layer.alpha_composite(shadow, (x + 12, y + product.height - 25))
     background = Image.alpha_composite(background, shadow_layer)
     background.alpha_composite(product, (x, y))
 
@@ -550,7 +556,6 @@ async def main_async():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    # Mantener el hilo principal activo con el servidor web
     while True:
         await asyncio.sleep(3600)
 
