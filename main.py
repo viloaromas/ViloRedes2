@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import requests
 from PIL import Image, ImageOps
-from google import genai
+import google.generativeai as genai
 from ddgs import DDGS
 
 from telegram import (
@@ -57,6 +57,8 @@ if not TELEGRAM_TOKEN:
     logger.warning("Falta la variable TELEGRAM_TOKEN.")
 if not GEMINI_API_KEY:
     logger.warning("Falta la variable GEMINI_API_KEY. La identificación y los copies estarán deshabilitados.")
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 # ---------------------------------------------------------
@@ -104,17 +106,7 @@ def get_image_from_bytes(data):
 # GEMINI: IDENTIFICAR PRODUCTO Y REDACTAR COPIES
 # ---------------------------------------------------------
 
-def get_gemini_client():
-    if not GEMINI_API_KEY:
-        raise RuntimeError("Falta configurar GEMINI_API_KEY en Render.")
-    return genai.Client(api_key=GEMINI_API_KEY)
-
-
 def identificar_producto(image):
-    """
-    Devuelve una identificación solo cuando hay datos suficientes.
-    Nunca reemplaza una identificación fallida por una marca o fragancia inventada.
-    """
     prompt = """
 Analiza cuidadosamente la fotografía del producto.
 
@@ -157,10 +149,8 @@ La confianza debe ser un número entre 0 y 1.
 Las consultas deben incluir solo marca, nombre y variante que realmente hayas podido leer.
 """
     try:
-        response = get_gemini_client().models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[image, prompt],
-        )
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content([image, prompt])
         raw = (response.text or "").strip()
         match = re.search(r"\{.*\}", raw, flags=re.S)
         if not match:
@@ -180,7 +170,6 @@ Las consultas deben incluir solo marca, nombre y variante que realmente hayas po
             if str(term).strip()
         ][:3]
 
-        # Si la respuesta no es suficientemente segura, no se habilita la búsqueda.
         if not identified or not terms:
             return {
                 "identified": False,
@@ -205,7 +194,9 @@ Las consultas deben incluir solo marca, nombre y variante que realmente hayas po
 
 
 def redactar_copy(user_message):
-    client = get_gemini_client()
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Falta configurar GEMINI_API_KEY.")
+    model = genai.GenerativeModel(GEMINI_MODEL)
     prompt = (
         "Actúa como community manager de Vilo Aromas, negocio de artículos "
         "de limpieza y aromatización. Escribe en español rioplatense, "
@@ -214,10 +205,7 @@ def redactar_copy(user_message):
         "el usuario no haya indicado.\n\n"
         f"Solicitud del usuario: {user_message}"
     )
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
+    response = model.generate_content(prompt)
     return (response.text or "No pude generar el texto.").strip()
 
 
@@ -255,7 +243,6 @@ def buscar_imagenes_web(search_terms, max_resultados=4):
                     if not 5_000 <= len(data) <= 10_000_000:
                         continue
 
-                    # Verifica que el archivo descargado sea realmente una imagen.
                     image = get_image_from_bytes(data)
                     if image.width < 180 or image.height < 180:
                         continue
@@ -660,7 +647,6 @@ async def main_async():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Render mantiene vivo el proceso; el servidor HTTP responde al health check.
     threading.Thread(target=run_web_server, daemon=True).start()
 
     try:
