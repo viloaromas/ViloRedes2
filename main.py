@@ -197,17 +197,37 @@ def descargar_imagen(url: str, max_side: int | None = None, quality: int = 88) -
 
 
 def adaptar_formato(data: bytes, size: tuple[int, int]) -> bytes:
+    """Adapta la foto al lienzo sin estirar ni recortar el producto.
+
+    La foto original se amplía proporcionalmente hasta ocupar el máximo espacio
+    posible del formato. Si su proporción no coincide con el lienzo, los espacios
+    restantes se completan con una extensión desenfocada de la propia fotografía.
+    Así se evita tanto deformar como dejar la foto innecesariamente pequeña.
+    """
     with Image.open(io.BytesIO(data)) as im:
         original = ImageOps.exif_transpose(im).convert("RGB")
         W, H = size
-        # Fondo derivado de la misma foto, suavemente desenfocado; el producto no se recorta.
-        background = ImageOps.fit(original, (W, H), method=Image.Resampling.LANCZOS)
-        background = background.filter(ImageFilter.GaussianBlur(radius=max(16, int(min(W, H) * 0.035))))
-        overlay = ImageOps.contain(original, (int(W * 0.94), int(H * 0.94)), method=Image.Resampling.LANCZOS)
-        x, y = (W - overlay.width) // 2, (H - overlay.height) // 2
-        background.paste(overlay, (x, y))
+
+        # El fondo llena el formato; solo se recorta esta copia desenfocada, nunca
+        # la foto principal ni el producto.
+        background = ImageOps.fit(
+            original, (W, H), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5)
+        )
+        background = background.filter(
+            ImageFilter.GaussianBlur(radius=max(24, int(min(W, H) * 0.045)))
+        )
+
+        # La imagen nítida usa prácticamente todo el espacio disponible.
+        # ImageOps.contain conserva la proporción original y no corta bordes.
+        foreground = ImageOps.contain(
+            original, (W, H), method=Image.Resampling.LANCZOS
+        )
+        x = (W - foreground.width) // 2
+        y = (H - foreground.height) // 2
+        background.paste(foreground, (x, y))
+
         out = io.BytesIO()
-        background.save(out, format="JPEG", quality=93, optimize=True)
+        background.save(out, format="JPEG", quality=94, optimize=True)
         return out.getvalue()
 
 
@@ -223,12 +243,48 @@ def generar_descripcion(producto: dict, formato: str) -> str:
         "codigo_interno": producto.get("codigo", ""),
         "rubro": producto.get("rubro", ""),
     }
-    prompt = f"""Sos redactor publicitario de {BRAND}. Escribí en español rioplatense natural, atractivo y vendedor.
-Datos reales disponibles del producto: {json.dumps(info, ensure_ascii=False)}
-Formato elegido: {spec['nombre']}.
-Objetivo: {spec['instruccion']}
-Límite absoluto: {spec['max_chars']} caracteres, contando espacios y saltos de línea.
-Reglas: no inventes ingredientes, propiedades, duración, tamaño, beneficios, precios ni promociones. No repitas datos que no estén confirmados. Usá un inicio que llame la atención, tono cálido y un llamado a la acción breve. Evitá hashtags genéricos en exceso. Devolvé solamente el texto final, sin explicar nada."""
+    contexto_marca = (
+        "Vilo Aromas es un comercio de Villa Martelli dedicado a artículos de limpieza "
+        "y productos de aromatización. Atiende tanto a clientes minoristas como mayoristas. "
+        "Los clientes pueden retirar en el local, comprar online mediante su tienda de "
+        "Mercado Libre o consultar por WhatsApp stock, precios mayoristas y entregas. "
+        "La marca comunica con cercanía, energía, confianza y conocimiento del rubro; "
+        "es un comercio de barrio con atención personal y alcance mayorista."
+    )
+    prompt = f"""Sos el redactor publicitario y community manager de {BRAND}.
+Tu trabajo es crear una descripción que DESPIERTE GANAS de conocer o comprar el producto,
+no limitarte a repetir su nombre ni escribir frases genéricas. Usá español rioplatense
+natural, comercial, cercano, enérgico y convincente, sin sonar exagerado ni artificial.
+
+IDENTIDAD REAL DEL COMERCIO:
+{contexto_marca}
+
+DATOS REALES DEL PRODUCTO (priorizalos y no agregues datos que no estén):
+{json.dumps(info, ensure_ascii=False)}
+
+FORMATO: {spec['nombre']}
+OBJETIVO DEL FORMATO: {spec['instruccion']}
+LÍMITE ABSOLUTO: {spec['max_chars']} caracteres, contando espacios y saltos de línea.
+
+CÓMO ESCRIBIR: empezá con un gancho llamativo que conecte con una necesidad,
+un ambiente o una situación cotidiana relacionada con el producto. Mencioná el nombre
+o tipo de producto de forma clara. Hacé que suene tentador con palabras concretas y
+ritmo natural. Cerrá con una invitación a comprar en Vilo Aromas o consultar por
+WhatsApp; cuando tenga sentido, mencioná la opción mayorista/minorista o la tienda
+online de Mercado Libre. Variá los llamados a la acción para que no parezcan copiados.
+
+REGLAS IMPORTANTES: no inventes aroma, ingredientes, composición, duración, tamaño,
+propiedades, resultados, usos específicos, stock, precios, descuentos, promociones ni
+condiciones de envío. No llames “repuesto” a un artículo salvo que los datos lo indiquen.
+No prometas que algo elimina, desinfecta o perfuma por determinada cantidad de tiempo
+sin respaldo en los datos. No repitas SKU ni código interno en el texto publicitario.
+Usá entre 1 y 3 emojis bien elegidos. Evitá hashtags genéricos y frases vacías como
+“dale una onda fresca” si no aportan algo concreto.
+
+Para Feed y Reel: escribí una descripción atractiva, fácil de leer, con 2 a 4 bloques
+breves y un cierre comercial. No hace falta agotar el máximo de caracteres.
+Para Historia: una sola frase muy potente y clara, breve y fácil de leer sobre la imagen.
+Devolvé únicamente el texto final, sin títulos, sin comillas y sin explicar nada."""
     response = GEMINI.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
