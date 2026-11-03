@@ -45,7 +45,7 @@ from telegram.error import Conflict
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
-GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1").strip()
 PORT = int(os.environ.get("PORT", "10000"))
 
 # Seguridad: IDs de Telegram permitidos, separados por coma. Vacío = cualquiera.
@@ -294,15 +294,11 @@ Composition: vertical or square commercial still-life set according to aspect ra
 
 Again: EMPTY BACKGROUND ONLY, absolutely no objects shaped like bottles, cans or packages."""
 
+    # Los modelos de generación de imágenes de Gemini devuelven output_image
+    # directamente; no se debe enviar response_format en esta llamada.
     interaction = client.interactions.create(
         model=GEMINI_IMAGE_MODEL,
         input=prompt,
-        response_format={
-            "type": "image",
-            "mime_type": "image/png",
-            "aspect_ratio": _aspect_ratio_para_ia(size),
-            "image_size": "1K",
-        },
     )
     generated = getattr(interaction, "output_image", None)
     encoded = getattr(generated, "data", None) if generated else None
@@ -1081,9 +1077,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             except Exception as e:
                 logger.exception("No se pudo crear la imagen publicitaria")
+                detalle = (str(e).strip() or e.__class__.__name__)[:350]
                 await estado.edit_text(
-                    "⚠️ No pude crear la imagen publicitaria. Revisá que tu clave de Gemini tenga acceso al modelo de imágenes "
-                    "y consultá los logs de Render. El resto del bot sigue disponible."
+                    "⚠️ No pude crear la imagen publicitaria.\n"
+                    f"Detalle técnico: {detalle}\n\n"
+                    "El resto del bot sigue disponible. Si vuelve a pasar, enviame este mensaje y los logs de Render."
                 )
 
         elif data == "asis":
