@@ -1229,6 +1229,15 @@ def main():
     app.add_error_handler(on_error)
 
     logger.info("Bot iniciado correctamente.")
+
+    # Python 3.14 ya no crea automáticamente un event loop en el hilo principal.
+    # python-telegram-bot 21.x usa asyncio.get_event_loop() dentro de run_polling,
+    # por eso dejamos uno creado y asociado antes de iniciar el polling.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app.run_polling(drop_pending_updates=True)
 
 
