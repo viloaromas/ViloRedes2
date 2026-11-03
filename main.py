@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import gc
 import re
 import json
@@ -44,6 +45,7 @@ from telegram.error import Conflict
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
 PORT = int(os.environ.get("PORT", "10000"))
 
 # Seguridad: IDs de Telegram permitidos, separados por coma. Vacío = cualquiera.
@@ -255,6 +257,128 @@ def fondo_blanco(image, size=None, margen=0.08):
     liberar_memoria()
     return lienzo, ok
 
+
+
+def _aspect_ratio_para_ia(size):
+    """Elige una relación de aspecto admitida por el generador de imágenes."""
+    w, h = size
+    ratio = w / max(h, 1)
+    if ratio > 1.55:
+        return "16:9"
+    if ratio > 1.12:
+        return "4:3"
+    if ratio < 0.68:
+        return "9:16"
+    if ratio < 0.9:
+        return "3:4"
+    return "1:1"
+
+
+def _generar_fondo_publicitario(producto, size):
+    """Genera SOLO el escenario; nunca se envía el envase original al generador."""
+    if not client:
+        raise RuntimeError("Falta GEMINI_API_KEY para crear imágenes publicitarias.")
+
+    nombre = str(producto.get("nombre", "producto de limpieza o aromatización"))
+    marca = str(producto.get("marca", ""))
+    fragancia = str(producto.get("fragancia", ""))
+    tipo = str(producto.get("tipo", "producto"))
+    detalle = ", ".join(x for x in (marca, fragancia, tipo, nombre) if x)
+    prompt = f"""Create a premium, photorealistic commercial product-photography BACKGROUND ONLY for this product category: {detalle}.
+
+IMPORTANT: Generate an EMPTY SCENE. Do NOT show any product, bottle, aerosol can, container, packaging, label, logo, lettering, text, watermark, or human. The real product will be composited later and must remain the only product in the final image.
+
+Design a beautiful realistic environment that visually communicates the product's scent and use. Use the fragrance/category cues naturally (for example citrus freshness for citrus scents, soft flowers for floral scents, clean linen and airy light for fresh scents, elegant warm materials for premium home fragrance). Do not make the scene cluttered or overly literal.
+
+Composition: vertical or square commercial still-life set according to aspect ratio {size[0]}:{size[1]}. Leave a clear, uncluttered central area for one tall product to be placed later. Include a believable tabletop/shelf/floor surface across the lower part of the frame where the product can physically stand. The surface and background must connect naturally, with realistic depth, perspective, soft directional studio/daylight, subtle atmospheric depth and enough negative space around the center. Camera at product-label height, professional advertising photography, realistic materials, refined color harmony, crisp high-end finish.
+
+Again: EMPTY BACKGROUND ONLY, absolutely no objects shaped like bottles, cans or packages."""
+
+    interaction = client.interactions.create(
+        model=GEMINI_IMAGE_MODEL,
+        input=prompt,
+        response_format={
+            "type": "image",
+            "mime_type": "image/png",
+            "aspect_ratio": _aspect_ratio_para_ia(size),
+            "image_size": "1K",
+        },
+    )
+    generated = getattr(interaction, "output_image", None)
+    encoded = getattr(generated, "data", None) if generated else None
+    if not encoded:
+        raise RuntimeError("Gemini no devolvió una imagen de fondo. Revisá el modelo y el acceso a generación de imágenes.")
+    raw = base64.b64decode(encoded)
+    with Image.open(io.BytesIO(raw)) as im:
+        return im.convert("RGB").copy()
+
+
+def _componer_producto_integrado(producto_rgba, fondo, size):
+    """Compone el recorte original con escala, apoyo, sombra de contacto y sombra ambiental."""
+    W, H = size
+    fondo = ImageOps.fit(fondo.convert("RGB"), (W, H), method=Image.LANCZOS)
+    producto_rgba = producto_rgba.convert("RGBA")
+    bbox = producto_rgba.getchannel("A").getbbox()
+    if not bbox:
+        raise RuntimeError("No pude detectar el contorno del producto en la foto original.")
+    producto_rgba = producto_rgba.crop(bbox)
+
+    # El producto ocupa una proporción importante del cuadro sin tapar el escenario.
+    max_h = int(H * 0.69)
+    max_w = int(W * 0.48)
+    escala = min(max_h / producto_rgba.height, max_w / producto_rgba.width)
+    nuevo = producto_rgba.resize(
+        (max(1, round(producto_rgba.width * escala)), max(1, round(producto_rgba.height * escala))),
+        Image.LANCZOS,
+    )
+
+    # Apoya el envase sobre la superficie; no se altera ni se repinta el producto.
+    x = (W - nuevo.width) // 2
+    base_y = int(H * 0.865)
+    y = base_y - nuevo.height
+    if y < int(H * 0.07):
+        y = int(H * 0.07)
+        base_y = y + nuevo.height
+
+    alpha = nuevo.getchannel("A")
+    # Sombra proyectada suave y desplazada, calculada a partir de la silueta real.
+    sombra = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    mascara = Image.new("L", (W, H), 0)
+    mascara.paste(alpha, (x + int(W * 0.012), y + int(H * 0.012)))
+    mascara = mascara.filter(ImageFilter.GaussianBlur(max(5, int(min(W, H) * 0.018))))
+    sombra_color = Image.new("RGBA", (W, H), (24, 20, 18, 0))
+    sombra_color.putalpha(mascara.point(lambda v: int(v * 0.25)))
+    fondo = Image.alpha_composite(fondo.convert("RGBA"), sombra_color)
+
+    # Sombra de contacto elíptica: hace que el envase se sienta apoyado y no flotando.
+    contacto = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(contacto)
+    el_w = max(24, int(nuevo.width * 0.72))
+    el_h = max(8, int(H * 0.022))
+    cx = x + nuevo.width // 2
+    draw.ellipse((cx - el_w // 2, base_y - el_h // 2, cx + el_w // 2, base_y + el_h // 2), fill=(20, 16, 14, 105))
+    contacto = contacto.filter(ImageFilter.GaussianBlur(max(3, int(H * 0.012))))
+    fondo = Image.alpha_composite(fondo, contacto)
+
+    # El original queda por encima de las sombras: etiqueta, letras y colores no se regeneran.
+    fondo.alpha_composite(nuevo, (x, y))
+    return fondo.convert("RGB")
+
+
+def generar_imagen_publicitaria(original_bytes, producto):
+    """Crea un fondo con IA y coloca encima el recorte fiel de la foto original."""
+    original = get_image_from_bytes(original_bytes, 1600)
+    # La extracción usa el mismo modelo liviano que el fondo blanco.
+    with _pesado:
+        recortado = _recortar(original)
+    try:
+        fondo = _generar_fondo_publicitario(producto, POST_SIZE)
+        final = _componer_producto_integrado(recortado, fondo, POST_SIZE)
+        return to_jpeg(final, max(POST_SIZE), 93)
+    finally:
+        del original, recortado
+        liberar_memoria()
 
 def ajustar_a_formato(img, size=None):
     """Ajusta a POST_SIZE sin recortar el producto; si sobran bordes, los rellena con la misma foto desenfocada."""
@@ -730,6 +854,7 @@ def inicio_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚪ Poner fondo blanco", callback_data="bg")],
         [InlineKeyboardButton("🌐 Buscar el mismo producto en la web", callback_data="web")],
+        [InlineKeyboardButton("✨ Crear imagen publicitaria con IA", callback_data="ai_bg")],
         [InlineKeyboardButton("➡️ Usar la foto tal cual", callback_data="asis")],
         [InlineKeyboardButton("🗑 Reiniciar", callback_data="reset")],
     ])
@@ -827,7 +952,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 ¡Hola! Soy el asistente de <b>{html.escape(BRAND)}</b>.\n\n"
         "1️⃣ Mandame una foto de tu producto\n"
-        "2️⃣ Elegís: <b>fondo blanco</b>, <b>buscar el mismo producto en la web</b> o usar la foto tal cual\n"
+        "2️⃣ Elegís: <b>fondo blanco</b>, <b>buscar el mismo producto en la web</b>, <b>crear una imagen publicitaria con IA</b> o usar la foto tal cual\n"
         "3️⃣ Elegís qué hacer: descripción para <b>Feed</b>, texto para <b>Historia</b>, ver el post o publicar\n\n"
         "💡 Podés escribirme indicaciones (precio, promo, tamaño) y regenero la descripción.",
         parse_mode="HTML",
@@ -931,6 +1056,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"⚪ Fondo blanco listo ({len(ud['images'])} en el post){aviso}\n\n¿Qué hacemos ahora?",
                 reply_markup=acciones_kb(),
             )
+
+        elif data == "ai_bg":
+            if len(ud["images"]) >= MAX_POST_IMAGES:
+                await query.answer("Máximo 10 imágenes por post", show_alert=True)
+                return
+            await query.answer("Creando el escenario publicitario…")
+            estado = await bot.send_message(
+                chat_id,
+                "✨ Estoy creando un ambiente para este producto y después voy a integrarlo con su foto original. Puede tardar un poco…",
+            )
+            try:
+                b = await asyncio.to_thread(generar_imagen_publicitaria, ud["original"], ud["producto"])
+                agregada = _agregar(ud, b)
+                await estado.delete()
+                if not agregada:
+                    await bot.send_message(chat_id, "ℹ️ Esa imagen ya estaba en el post.", reply_markup=acciones_kb())
+                else:
+                    await bot.send_photo(
+                        chat_id,
+                        b,
+                        caption=f"✨ Imagen publicitaria creada ({POST_SIZE[0]}x{POST_SIZE[1]}) · {len(ud['images'])} en el post\n\n¿Qué hacemos ahora?",
+                        reply_markup=acciones_kb(),
+                    )
+            except Exception as e:
+                logger.exception("No se pudo crear la imagen publicitaria")
+                await estado.edit_text(
+                    "⚠️ No pude crear la imagen publicitaria. Revisá que tu clave de Gemini tenga acceso al modelo de imágenes "
+                    "y consultá los logs de Render. El resto del bot sigue disponible."
+                )
 
         elif data == "asis":
             await query.answer()
