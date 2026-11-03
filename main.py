@@ -1,7 +1,10 @@
 import os
 import io
+import gc
 import re
 import json
+import ctypes
+import unicodedata
 import html
 import uuid
 import hashlib
@@ -12,11 +15,11 @@ import threading
 from pathlib import Path
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import requests
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 from google import genai
 from google.genai import types
 
@@ -49,6 +52,18 @@ ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if 
 BRAND = os.environ.get("BRAND_NAME", "Vilo Aromas")
 CONTACT = os.environ.get("CONTACT_INFO", "")  # ej: "Pedidos por DM o WhatsApp 11-1234-5678"
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/tmp/vilo_models"))
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "").strip()  # serper.dev: Google Imágenes (recomendado)
+
+
+def _parse_size(txt, default=(1080, 1080)):
+    try:
+        w, h = txt.lower().split("x")
+        return int(w), int(h)
+    except Exception:
+        return default
+
+
+POST_SIZE = _parse_size(os.environ.get("POST_SIZE", "1080x1080"))  # ej: 1080x1350 para feed vertical 4:5
 
 # Destinos de publicación (opcionales)
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()  # @micanal o -100123...
@@ -66,6 +81,24 @@ logger = logging.getLogger("vilo_bot")
 
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+
+# ───────────────────────── Memoria (Render gratis: 512 MB) ─────────────────────────
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _libc.mallopt(-8, 2)  # M_ARENA_MAX=2: evita que cada hilo reserve su propia arena de memoria
+except Exception:
+    _libc = None
+
+
+def liberar_memoria():
+    """Devuelve al sistema la memoria que Python ya no usa (si no, el pico queda 'pegado')."""
+    gc.collect()
+    try:
+        if _libc:
+            _libc.malloc_trim(0)
+    except Exception:
+        pass
+
 
 client = (
     genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=60_000))
@@ -112,10 +145,17 @@ def run_web_server():
 
 
 # ───────────────────────── Utilidades de imagen ─────────────────────────
-def get_image_from_bytes(data):
+def get_image_from_bytes(data, max_side=1600):
+    """Abre una imagen sin cargarla entera en memoria: las fotos de 12 MP pesan ~36 MB decodificadas."""
     image = Image.open(io.BytesIO(data))
-    image = ImageOps.exif_transpose(image)
-    return image.convert("RGB")
+    if image.format == "JPEG":
+        w, h = image.size
+        k = max_side / max(w, h)
+        if k < 1:
+            image.draft("RGB", (max(1, round(w * k)), max(1, round(h * k))))  # el decodificador reduce al leer
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.thumbnail((max_side, max_side), Image.LANCZOS)
+    return image
 
 
 def shrink(image, max_side):
@@ -156,6 +196,7 @@ def _get_onnx():
             so.enable_cpu_mem_arena = False  # evita que la memoria crezca en cada foto
             so.enable_mem_pattern = False
             so.intra_op_num_threads = 1
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL  # menos memoria al inferir
             _onnx_session = ort.InferenceSession(str(path), sess_options=so, providers=["CPUExecutionProvider"])
         return _onnx_session
 
@@ -181,8 +222,9 @@ def _recortar(image):
     return rgba
 
 
-def fondo_blanco(image, size=1080, margen=0.08):
-    """Recorta el producto, lo centra en un lienzo blanco cuadrado. Devuelve (imagen, quitó_fondo)."""
+def fondo_blanco(image, size=None, margen=0.08):
+    """Recorta el producto y lo centra en un lienzo blanco de POST_SIZE. Devuelve (imagen, quitó_fondo)."""
+    W, H = size or POST_SIZE
     try:
         recortada = _recortar(image)
         ok = True
@@ -195,15 +237,30 @@ def fondo_blanco(image, size=1080, margen=0.08):
     if bbox:
         recortada = recortada.crop(bbox)
 
-    lado = int(size * (1 - 2 * margen))
-    ratio = min(lado / recortada.width, lado / recortada.height)
+    ratio = min(W * (1 - 2 * margen) / recortada.width, H * (1 - 2 * margen) / recortada.height)
     nueva = recortada.resize(
         (max(1, int(recortada.width * ratio)), max(1, int(recortada.height * ratio))),
         Image.LANCZOS,
     )
-    lienzo = Image.new("RGB", (size, size), "white")
-    lienzo.paste(nueva, ((size - nueva.width) // 2, (size - nueva.height) // 2), nueva)
+    lienzo = Image.new("RGB", (W, H), "white")
+    lienzo.paste(nueva, ((W - nueva.width) // 2, (H - nueva.height) // 2), nueva)
+    del recortada, nueva
+    liberar_memoria()
     return lienzo, ok
+
+
+def ajustar_a_formato(img, size=None):
+    """Ajusta a POST_SIZE sin recortar el producto; si sobran bordes, los rellena con la misma foto desenfocada."""
+    W, H = size or POST_SIZE
+    img = img.convert("RGB")
+    ratio = min(W / img.width, H / img.height)
+    nuevo = img.resize((max(1, round(img.width * ratio)), max(1, round(img.height * ratio))), Image.LANCZOS)
+    if abs(nuevo.width - W) <= 2 and abs(nuevo.height - H) <= 2:
+        return nuevo.resize((W, H), Image.LANCZOS)
+    chico = ImageOps.fit(img, (max(1, W // 8), max(1, H // 8)), Image.BILINEAR).filter(ImageFilter.GaussianBlur(4))
+    lienzo = chico.resize((W, H), Image.BICUBIC)
+    lienzo.paste(nuevo, ((W - nuevo.width) // 2, (H - nuevo.height) // 2))
+    return lienzo
 
 
 # ───────────────────────── Gemini ─────────────────────────
@@ -299,19 +356,34 @@ def _get_ddgs():
     return DDGS
 
 
-def _descargar(url):
+def _origen(url):
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}/"
+
+
+def _descargar_full(url, max_side=2160, min_side=0, max_bytes=15_000_000):
+    """Descarga una imagen y la abre ya reducida a max_side. Devuelve None si falla o es muy chica."""
     try:
-        r = HTTP.get(url, timeout=(4, 8))
+        r = HTTP.get(url, timeout=(5, 15), headers={"Referer": _origen(url)})
         r.raise_for_status()
         data = r.content
-        if not (5_000 <= len(data) <= 8_000_000):
+        if not (3_000 <= len(data) <= max_bytes):
             return None
-        img = get_image_from_bytes(data)
-        if min(img.size) < 300:
-            return None
-        return img
+        with Image.open(io.BytesIO(data)) as probe:
+            if min(probe.size) < min_side:
+                return None
+        return get_image_from_bytes(data, max_side)
     except Exception:
         return None
+
+
+def _descargar_miniatura(item):
+    """Miniatura liviana (≤384 px) para verificar con Gemini: usa la del buscador y, si no hay, la imagen reducida."""
+    if item.get("thumb"):
+        img = _descargar_full(item["thumb"], 384, min_side=80)
+        if img:
+            return img
+    return _descargar_full(item["url"], 384, min_side=300)
 
 
 def _og_image(page_url):
@@ -362,39 +434,96 @@ def _planear_queries(producto, referencia, extra=None):
     return out[:8]
 
 
-def _recolectar_urls(queries):
+def _norm(s):
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9 ]+", " ", s)
+
+
+def _filtro_relevancia(producto, extra=None):
+    """Función que dice si un texto (título/URL de un resultado) tiene que ver con el producto."""
+    if extra:
+        palabras = [w for w in _norm(extra).split() if len(w) >= 3]
+        minimo = max(1, (len(palabras) + 1) // 2)
+        return lambda t: sum(w in _norm(t) for w in palabras) >= minimo
+    marca = [w for w in _norm(producto.get("marca", "")).split() if len(w) >= 3]
+    frag = [w for w in _norm(producto.get("fragancia", "")).split() if len(w) >= 4]
+    claves = marca or frag
+    if not claves:
+        return lambda t: True
+    return lambda t: any(w in _norm(t) for w in claves)
+
+
+def _recolectar_urls(queries, relevante):
+    """Devuelve candidatas como dicts {url, thumb, texto}. No descarga imágenes completas."""
+    items, vistos = [], set()
+    stats = {"serper": 0, "paginas": 0, "ddg": 0, "descartadas": 0, "chicas": 0}
+
+    def agregar(url, texto, fuente, thumb=None, ancho=None, alto=None):
+        if not url or url in vistos:
+            return
+        vistos.add(url)
+        if isinstance(ancho, int) and isinstance(alto, int) and min(ancho, alto) < 400:
+            stats["chicas"] += 1
+            return
+        if relevante(f"{texto} {url}"):
+            items.append({"url": url, "thumb": thumb, "texto": texto})
+            stats[fuente] += 1
+        else:
+            stats["descartadas"] += 1
+
+    # 1) Google Imágenes vía Serper (si hay clave): la fuente más confiable
+    if SERPER_API_KEY:
+        for q in queries[:4]:
+            try:
+                r = HTTP.post(
+                    "https://google.serper.dev/images",
+                    headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                    json={"q": q, "gl": "ar", "hl": "es", "num": 10},
+                    timeout=15,
+                )
+                r.raise_for_status()
+                for it in r.json().get("images", []):
+                    agregar(
+                        it.get("imageUrl"), f"{it.get('title', '')} {it.get('source', '')} {it.get('link', '')}", "serper",
+                        thumb=it.get("thumbnailUrl"), ancho=it.get("imageWidth"), alto=it.get("imageHeight"),
+                    )
+            except Exception:
+                logger.warning("Serper falló: %s", q, exc_info=True)
+
     DDGS = _get_ddgs()
-    urls, vistos = [], set()
 
-    def agregar(u):
-        if u and u not in vistos:
-            vistos.add(u)
-            urls.append(u)
-
-    # 1) Fotos principales de páginas de producto (tiendas): suelen ser la foto real del producto
-    paginas = []
+    # 2) Foto principal (og:image) de páginas de tiendas que mencionan el producto
+    paginas = {}
     for q in queries[:3]:
         try:
             with DDGS() as d:
-                paginas += [r.get("href") for r in d.text(q, region="ar-es", max_results=6) if r.get("href")]
+                for r in d.text(q, region="ar-es", max_results=6):
+                    href = r.get("href")
+                    if href and relevante(f"{r.get('title', '')} {r.get('body', '')} {href}"):
+                        paginas[href] = True
         except Exception:
             logger.warning("Búsqueda de páginas fallida: %s", q, exc_info=True)
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for u in pool.map(_og_image, list(dict.fromkeys(paginas))[:10]):
-            agregar(u)
-    n_paginas = len(urls)
+        for u in pool.map(_og_image, list(paginas)[:10]):
+            agregar(u, "", "paginas")
 
-    # 2) Búsqueda de imágenes
+    # 3) Búsqueda de imágenes de DuckDuckGo/Bing (menos confiable: solo si falta material)
     for q in queries:
+        if len(items) >= 10:
+            break
         try:
             with DDGS() as d:
-                for item in d.images(q, region="ar-es", safesearch="moderate", max_results=10):
-                    agregar(item.get("image"))
+                for it in d.images(q, region="ar-es", safesearch="moderate", max_results=10):
+                    agregar(
+                        it.get("image"), f"{it.get('title', '')} {it.get('url', '')} {it.get('source', '')}", "ddg",
+                        thumb=it.get("thumbnail"), ancho=it.get("width"), alto=it.get("height"),
+                    )
         except Exception:
             logger.warning("Búsqueda de imágenes fallida: %s", q, exc_info=True)
         time.sleep(0.3)
-    logger.info("Web: %d consultas, %d urls (%d de páginas de producto)", len(queries), len(urls), n_paginas)
-    return urls
+
+    logger.info("Web: %d consultas -> %d candidatas relevantes %s", len(queries), len(items), stats)
+    return items
 
 
 def _clasificar(producto, referencia, candidatas):
@@ -419,44 +548,68 @@ def _clasificar(producto, referencia, candidatas):
 
 
 def buscar_imagenes_web(producto, referencia, extra=None):
-    """Devuelve (imágenes, nivel). nivel: 'exacto' | 'parcial' (misma marca/línea) | 'aprox' (solo parecidas)."""
+    try:
+        return _buscar_imagenes_web(producto, referencia, extra)
+    finally:
+        liberar_memoria()
+
+
+def _con_vista_previa(elegidos):
+    """Para las candidatas verificadas, baja una vista previa nítida (~900 px). Guarda solo bytes livianos y la URL."""
+    def uno(par):
+        it, mini = par
+        prev = _descargar_full(it["url"], 900, min_side=300)
+        return {
+            "url": it["url"],
+            "preview": to_jpeg(prev or mini, 900, 85),
+            "miniatura": prev is None,
+            "fuente": urlparse(it["url"]).netloc.replace("www.", ""),
+        }
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return list(pool.map(uno, elegidos))
+
+
+def _buscar_imagenes_web(producto, referencia, extra=None):
+    """Devuelve (resultados, nivel). Cada resultado: {url, preview(bytes), miniatura, fuente}.
+    nivel: 'exacto' | 'parcial' (misma marca/línea) | 'vacio' | 'error'. Nunca devuelve fotos sin verificar."""
     queries = _planear_queries(producto, referencia, extra)
     logger.info("Consultas: %s", queries)
-    urls = _recolectar_urls(queries)
+    items = _recolectar_urls(queries, _filtro_relevancia(producto, extra))
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        imagenes = list(pool.map(_descargar, urls[:40]))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        minis = list(pool.map(_descargar_miniatura, items[:20]))
 
     candidatas, hashes = [], set()
-    for img in imagenes:
-        if img is None:
+    for it, mini in zip(items, minis):
+        if mini is None:
             continue
-        h = hashlib.md5(img.resize((16, 16)).convert("L").tobytes()).hexdigest()
+        h = hashlib.md5(mini.resize((16, 16)).convert("L").tobytes()).hexdigest()
         if h in hashes:
             continue
         hashes.add(h)
-        candidatas.append(img)
+        candidatas.append((it, mini))
         if len(candidatas) >= 14:
             break
-    logger.info("Web: %d descargadas, %d candidatas únicas", sum(i is not None for i in imagenes), len(candidatas))
+    logger.info("Web: %d miniaturas descargadas, %d candidatas únicas", sum(m is not None for m in minis), len(candidatas))
 
     if not candidatas:
-        return [], "aprox"
+        return [], "vacio"
     if not client:
-        return candidatas[:4], "aprox"
-
+        return [], "error"
     try:
-        match = _clasificar(producto, referencia, candidatas)
-        iguales = [i for i, v in match.items() if v == "igual"]
-        lineas = [i for i, v in match.items() if v == "misma_linea"]
-        logger.info("Web: %d iguales, %d de la misma línea", len(iguales), len(lineas))
-        if iguales:
-            return [candidatas[i] for i in iguales[:6]], "exacto"
-        if lineas:
-            return [candidatas[i] for i in lineas[:4]], "parcial"
+        match = _clasificar(producto, referencia, [mini for _, mini in candidatas])
     except Exception:
         logger.exception("Falló la clasificación con Gemini")
-    return candidatas[:3], "aprox"
+        return [], "error"
+
+    iguales = [i for i, v in match.items() if v == "igual"]
+    lineas = [i for i, v in match.items() if v == "misma_linea"]
+    logger.info("Web: %d iguales, %d de la misma línea", len(iguales), len(lineas))
+    if iguales:
+        return _con_vista_previa([candidatas[i] for i in iguales[:6]]), "exacto"
+    if lineas:
+        return _con_vista_previa([candidatas[i] for i in lineas[:4]]), "parcial"
+    return [], "vacio"
 
 
 # ───────────────────────── Publicación ─────────────────────────
@@ -555,6 +708,10 @@ def acciones_kb():
     ])
 
 
+def _nombre_archivo(ud):
+    return "".join(c if c.isalnum() else "_" for c in ud["producto"]["nombre"])[:25]
+
+
 def _agregar(ud, data):
     """Suma una imagen al post. Devuelve True si se agregó, False si ya estaba o se llegó al máximo."""
     if data in ud["images"] or len(ud["images"]) >= MAX_POST_IMAGES:
@@ -574,30 +731,39 @@ async def mostrar_resultados(bot, chat_id, ud, extra=None):
     results, nivel = await asyncio.to_thread(buscar_imagenes_web, ud["producto"], referencia, extra)
     await estado.delete()
     if not results:
-        await bot.send_message(
-            chat_id,
-            "⚠️ No encontré imágenes de ese producto. Probá con tus propias palabras "
-            "(ej: «difusor iluminarte prestige mil flores») o elegí otra opción.",
-            reply_markup=_con_busqueda_manual(inicio_kb()),
-        )
+        if nivel == "error":
+            texto = "⚠️ No pude verificar las imágenes ahora (Gemini no respondió). Probá de nuevo en un momento."
+        else:
+            texto = (
+                "⚠️ No encontré fotos que pueda confirmar como ese producto. "
+                "Probá con tus propias palabras (ej: «difusor iluminarte prestige mil flores») o elegí otra opción."
+            )
+            if not SERPER_API_KEY:
+                texto += "\n\n💡 Para resultados mucho mejores, configurá SERPER_API_KEY (Google Imágenes)."
+        await bot.send_message(chat_id, texto, reply_markup=_con_busqueda_manual(inicio_kb()))
         return
-    ud["web"] = [to_jpeg(img) for img in results]
+    ud["web"] = results
     ud["web_sid"] = ud.get("web_sid", 0) + 1
     sid = ud["web_sid"]
     avisos = {
         "parcial": "ℹ️ No encontré el mismo producto exacto. Estas son de la misma marca/línea (puede cambiar la fragancia).",
-        "aprox": "ℹ️ No pude confirmar que sea el mismo producto; son las más parecidas. Revisalas antes de usarlas.",
     }
     if nivel in avisos:
         await bot.send_message(chat_id, avisos[nivel])
-    for i, b in enumerate(ud["web"]):
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("➕ Agregar", callback_data=f"add_{sid}_{i}"),
-            InlineKeyboardButton("⚪ Fondo blanco + agregar", callback_data=f"wb_{sid}_{i}"),
-        ]])
-        await bot.send_photo(chat_id, b, caption=f"🖼️ Opción {i + 1}", reply_markup=kb)
     await bot.send_message(
-        chat_id, "Elegí las fotos que quieras y después decidí qué hacer 👇",
+        chat_id,
+        f"👇 Son vistas previas. Si te gusta una, tocá «Aprobar»: descargo la original, la ajusto a "
+        f"{POST_SIZE[0]}x{POST_SIZE[1]} y la guardo.",
+    )
+    for i, it in enumerate(results):
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Aprobar y guardar", callback_data=f"ap_{sid}_{i}"),
+            InlineKeyboardButton("⚪ Fondo blanco y guardar", callback_data=f"apb_{sid}_{i}"),
+        ]])
+        nota = " (solo hay miniatura)" if it.get("miniatura") else ""
+        await bot.send_photo(chat_id, it["preview"], caption=f"🖼️ Opción {i + 1} · {it['fuente']}{nota}", reply_markup=kb)
+    await bot.send_message(
+        chat_id, "Cuando termines, decidí qué hacer 👇",
         reply_markup=_con_busqueda_manual(acciones_kb()),
     )
 
@@ -716,7 +882,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Quitando el fondo…")
             img = get_image_from_bytes(ud["original"])
             blanca, ok = await asyncio.to_thread(fondo_blanco, img)
-            b = to_jpeg(blanca, 1080, 92)
+            b = to_jpeg(blanca, max(POST_SIZE), 92)
             _agregar(ud, b)
             aviso = "" if ok else "\n⚠️ No pude quitar el fondo (revisá los logs)."
             await bot.send_photo(
@@ -735,7 +901,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await mostrar_resultados(bot, chat_id, ud)
 
-        elif data.startswith(("add_", "wb_")):
+        elif data.startswith(("ap_", "apb_")):
             kind, sid, idx = data.split("_")
             sid, idx = int(sid), int(idx)
             if sid != ud.get("web_sid") or not (0 <= idx < len(ud["web"])):
@@ -744,16 +910,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(ud["images"]) >= MAX_POST_IMAGES:
                 await query.answer("Máximo 10 imágenes por post", show_alert=True)
                 return
-            if kind == "add":
-                _agregar(ud, ud["web"][idx])
-                await query.answer(f"Agregada ✅ ({len(ud['images'])} en el post)", show_alert=True)
+            await query.answer("Descargando la original…")
+            item = ud["web"][idx]
+            img = await asyncio.to_thread(_descargar_full, item["url"], 2160, 300)
+            baja = img is None
+            if baja:
+                img = get_image_from_bytes(item["preview"])
+            if kind == "apb":
+                final, _ = await asyncio.to_thread(fondo_blanco, img)
             else:
-                await query.answer("Quitando el fondo…")
-                img = get_image_from_bytes(ud["web"][idx])
-                blanca, _ = await asyncio.to_thread(fondo_blanco, img)
-                b = to_jpeg(blanca, 1080, 92)
-                _agregar(ud, b)
-                await bot.send_photo(chat_id, b, caption=f"⚪ Agregada con fondo blanco ({len(ud['images'])} en el post)")
+                final = await asyncio.to_thread(ajustar_a_formato, img)
+            b = to_jpeg(final, max(POST_SIZE), 92)
+            del img, final
+            _agregar(ud, b)
+            notas = []
+            if baja:
+                notas.append("⚠️ No pude bajar la original; usé la vista previa (menor calidad).")
+            if GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY:
+                try:
+                    links = await asyncio.to_thread(guardar_en_drive, [b], _nombre_archivo(ud))
+                    notas.append("☁️ Guardada en Drive: " + links[0])
+                except Exception:
+                    logger.exception("No se pudo subir a Drive")
+                    notas.append("⚠️ No pude subirla a Drive (revisá permisos o usá una Unidad compartida).")
+            titulo = f"✅ Aprobada ({POST_SIZE[0]}x{POST_SIZE[1]}) · {len(ud['images'])} en el post"
+            await bot.send_photo(chat_id, b, caption="\n".join([titulo] + notas), reply_markup=acciones_kb())
 
         elif data == "desc":
             await query.answer("Escribiendo…")
