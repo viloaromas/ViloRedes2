@@ -4,9 +4,11 @@ import json
 import html
 import uuid
 import hashlib
+import time
 import logging
 import asyncio
 import threading
+from pathlib import Path
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -28,8 +30,10 @@ from telegram.ext import (
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    TypeHandler,
     filters,
 )
+from telegram.error import Conflict
 
 # ───────────────────────── Configuración ─────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -42,7 +46,7 @@ ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if 
 
 BRAND = os.environ.get("BRAND_NAME", "Vilo Aromas")
 CONTACT = os.environ.get("CONTACT_INFO", "")  # ej: "Pedidos por DM o WhatsApp 11-1234-5678"
-REMBG_MODEL = os.environ.get("REMBG_MODEL", "u2netp")  # u2netp = liviano; isnet-general-use = mejor calidad
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/tmp/vilo_models"))
 
 # Destinos de publicación (opcionales)
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()  # @micanal o -100123...
@@ -61,7 +65,10 @@ logger = logging.getLogger("vilo_bot")
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+client = (
+    genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=60_000))
+    if GEMINI_API_KEY else None
+)
 
 
 # ───────────────────────── Servidor de salud (Render) ─────────────────────────
@@ -80,6 +87,19 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+
+def keep_alive():
+    """Auto-ping cada 10 min para que Render (plan gratis) no duerma el servicio."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not url:
+        return
+    while True:
+        time.sleep(600)
+        try:
+            HTTP.get(url, timeout=15)
+        except Exception:
+            pass
 
 
 def run_web_server():
@@ -109,24 +129,60 @@ def to_jpeg(image, max_side=1600, quality=90):
     return buf.getvalue()
 
 
-_rembg_session = None
-_rembg_lock = threading.Lock()
+U2NETP_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
+_onnx_session = None
+_onnx_lock = threading.Lock()
+_run_lock = threading.Lock()
 
 
-def _get_rembg():
-    global _rembg_session
-    with _rembg_lock:
-        if _rembg_session is None:
-            from rembg import new_session
-            _rembg_session = new_session(REMBG_MODEL)
-        return _rembg_session
+def _get_onnx():
+    """Carga U2-Netp (4.7 MB) directo con onnxruntime, sin la librería rembg (que consume >500 MB)."""
+    global _onnx_session
+    with _onnx_lock:
+        if _onnx_session is None:
+            import onnxruntime as ort
+
+            path = MODEL_DIR / "u2netp.onnx"
+            if not path.exists() or path.stat().st_size < 1_000_000:
+                MODEL_DIR.mkdir(parents=True, exist_ok=True)
+                r = HTTP.get(U2NETP_URL, timeout=60)
+                r.raise_for_status()
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(r.content)
+                tmp.replace(path)
+            so = ort.SessionOptions()
+            so.enable_cpu_mem_arena = False  # evita que la memoria crezca en cada foto
+            so.enable_mem_pattern = False
+            so.intra_op_num_threads = 1
+            _onnx_session = ort.InferenceSession(str(path), sess_options=so, providers=["CPUExecutionProvider"])
+        return _onnx_session
+
+
+def _recortar(image):
+    """Quita el fondo y devuelve una imagen RGBA."""
+    import numpy as np
+
+    sess = _get_onnx()
+    src = shrink(image, 1024).convert("RGB")
+    small = np.asarray(src.resize((320, 320), Image.LANCZOS), dtype=np.float32)
+    small = small / max(float(small.max()), 1e-6)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    x = ((small - mean) / std).transpose(2, 0, 1)[None].astype(np.float32)
+    with _run_lock:
+        pred = sess.run(None, {sess.get_inputs()[0].name: x})[0][0, 0]
+    pred = (pred - pred.min()) / max(float(pred.max() - pred.min()), 1e-6)
+    mask = Image.fromarray((pred * 255).astype("uint8"), "L").resize(src.size, Image.LANCZOS)
+    mask = mask.point(lambda v: 0 if v < 40 else 255 if v > 200 else int((v - 40) * 255 / 160))  # bordes más nítidos
+    rgba = src.convert("RGBA")
+    rgba.putalpha(mask)
+    return rgba
 
 
 def fondo_blanco(image, size=1080, margen=0.08):
     """Recorta el producto, lo centra en un lienzo blanco cuadrado. Devuelve (imagen, quitó_fondo)."""
     try:
-        from rembg import remove
-        recortada = remove(shrink(image, 1024), session=_get_rembg()).convert("RGBA")
+        recortada = _recortar(image)
         ok = True
     except Exception:
         logger.exception("No se pudo quitar el fondo")
@@ -443,7 +499,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ud.clear()
         ud.update(producto=producto, blanca=blanca_bytes, images=[blanca_bytes], web=[], notas="", caption="")
 
-        aviso = "" if ok else "\n⚠️ No pude quitar el fondo (revisá que rembg esté instalado)."
+        aviso = "" if ok else "\n⚠️ No pude quitar el fondo (revisá los logs)."
         await estado.delete()
         await msg.reply_photo(
             blanca_bytes,
@@ -570,7 +626,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await bot.send_message(chat_id, "⚠️ Algo falló. Revisá los logs o probá de nuevo.")
 
 
+async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    logger.info("Update recibido de %s (%s)", user.id if user else "?", type(update.effective_message).__name__)
+
+
+async def post_init(app):
+    me = await app.bot.get_me()
+    logger.info("Conectado como @%s", me.username)
+
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    if isinstance(context.error, Conflict):
+        logger.error("CONFLICT: hay OTRA instancia usando este mismo TELEGRAM_TOKEN. Apagá la otra.")
+        return
     logger.error("Error no controlado", exc_info=context.error)
 
 
@@ -581,8 +650,16 @@ def main():
         logger.warning("ALLOWED_USER_IDS vacío: cualquiera puede usar el bot y publicar en tus redes.")
 
     threading.Thread(target=run_web_server, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(True)  # una foto lenta no bloquea los demás mensajes
+        .post_init(post_init)
+        .build()
+    )
+    app.add_handler(TypeHandler(Update, log_update), group=-1)
     app.add_handler(CommandHandler(["start", "nuevo"], start))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
