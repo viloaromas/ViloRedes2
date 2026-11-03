@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import signal
 import threading
 import time
 import unicodedata
@@ -530,6 +531,39 @@ def run_health_server() -> None:
         logger.exception("No se pudo iniciar el servidor de salud")
 
 
+async def ejecutar_aplicacion(app) -> None:
+    """Inicia PTB usando asyncio.run, sin depender de get_event_loop() global."""
+    detener = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    # Render envía SIGTERM al detener o reemplazar una instancia.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, detener.set)
+        except (NotImplementedError, RuntimeError):
+            # En plataformas sin soporte de señales, asyncio.run sigue
+            # gestionando la cancelación normal del proceso.
+            pass
+
+    await app.initialize()
+    try:
+        if app.updater is None:
+            raise RuntimeError("La aplicación no tiene Updater habilitado.")
+
+        # Mismo orden de inicio que recomienda python-telegram-bot:
+        # initialize -> updater.start_polling -> application.start.
+        await app.updater.start_polling(drop_pending_updates=True)
+        await app.start()
+        logger.info("Bot de Telegram iniciado correctamente; esperando mensajes.")
+        await detener.wait()
+    finally:
+        if app.updater is not None and app.updater.running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
+        await app.shutdown()
+
+
 def main() -> None:
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Falta TELEGRAM_TOKEN.")
@@ -546,7 +580,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO, procesar_foto))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, texto))
-    app.run_polling(drop_pending_updates=True)
+
+    # asyncio.run crea, ejecuta y cierra un bucle de eventos propio. Esto evita
+    # el RuntimeError de Python 3.14 al usar Application.run_polling().
+    asyncio.run(ejecutar_aplicacion(app))
 
 
 if __name__ == "__main__":
