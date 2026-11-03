@@ -52,7 +52,6 @@ ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if 
 BRAND = os.environ.get("BRAND_NAME", "Vilo Aromas")
 CONTACT = os.environ.get("CONTACT_INFO", "")  # ej: "Pedidos por DM o WhatsApp 11-1234-5678"
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/tmp/vilo_models"))
-SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "").strip()  # serper.dev: Google Imágenes (recomendado)
 
 
 def _parse_size(txt, default=(1080, 1080)):
@@ -78,6 +77,8 @@ MAX_POST_IMAGES = 10  # límite de Telegram para álbumes
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("vilo_bot")
+
+Image.MAX_IMAGE_PIXELS = 25_000_000  # rechaza imágenes gigantes (un PNG de 20 MB puede ocupar >500 MB decodificado)
 
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -147,15 +148,18 @@ def run_web_server():
 # ───────────────────────── Utilidades de imagen ─────────────────────────
 def get_image_from_bytes(data, max_side=1600):
     """Abre una imagen sin cargarla entera en memoria: las fotos de 12 MP pesan ~36 MB decodificadas."""
-    image = Image.open(io.BytesIO(data))
-    if image.format == "JPEG":
-        w, h = image.size
-        k = max_side / max(w, h)
-        if k < 1:
-            image.draft("RGB", (max(1, round(w * k)), max(1, round(h * k))))  # el decodificador reduce al leer
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    image.thumbnail((max_side, max_side), Image.LANCZOS)
-    return image
+    with _pesado:
+        image = Image.open(io.BytesIO(data))
+        if image.size[0] * image.size[1] > Image.MAX_IMAGE_PIXELS:
+            raise ValueError("Imagen demasiado grande")
+        if image.format == "JPEG":
+            w, h = image.size
+            k = max_side / max(w, h)
+            if k < 1:
+                image.draft("RGB", (max(1, round(w * k)), max(1, round(h * k))))  # el decodificador reduce al leer
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        image.thumbnail((max_side, max_side), Image.LANCZOS)
+        return image
 
 
 def shrink(image, max_side):
@@ -170,6 +174,8 @@ def to_jpeg(image, max_side=1600, quality=90):
     shrink(image, max_side).convert("RGB").save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
 
+
+_pesado = threading.Semaphore(1)  # una sola tarea pesada de imagen a la vez (el pico del modelo ronda 300 MB)
 
 U2NETP_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
 _onnx_session = None
@@ -226,7 +232,8 @@ def fondo_blanco(image, size=None, margen=0.08):
     """Recorta el producto y lo centra en un lienzo blanco de POST_SIZE. Devuelve (imagen, quitó_fondo)."""
     W, H = size or POST_SIZE
     try:
-        recortada = _recortar(image)
+        with _pesado:
+            recortada = _recortar(image)
         ok = True
     except Exception:
         logger.exception("No se pudo quitar el fondo")
@@ -361,16 +368,29 @@ def _origen(url):
     return f"{p.scheme}://{p.netloc}/"
 
 
-def _descargar_full(url, max_side=2160, min_side=0, max_bytes=15_000_000):
+def _leer_tope(r, max_bytes):
+    """Lee la respuesta en trozos y corta si pasa max_bytes (evita bajar archivos enormes a memoria)."""
+    buf = bytearray()
+    for chunk in r.iter_content(65_536):
+        buf += chunk
+        if len(buf) > max_bytes:
+            return None
+    return bytes(buf)
+
+
+def _descargar_full(url, max_side=1600, min_side=0, max_bytes=8_000_000):
     """Descarga una imagen y la abre ya reducida a max_side. Devuelve None si falla o es muy chica."""
     try:
-        r = HTTP.get(url, timeout=(5, 15), headers={"Referer": _origen(url)})
-        r.raise_for_status()
-        data = r.content
-        if not (3_000 <= len(data) <= max_bytes):
+        with HTTP.get(url, timeout=(5, 15), headers={"Referer": _origen(url)}, stream=True) as r:
+            r.raise_for_status()
+            if int(r.headers.get("Content-Length") or 0) > max_bytes:
+                return None
+            data = _leer_tope(r, max_bytes)
+        if not data or len(data) < 3_000:
             return None
         with Image.open(io.BytesIO(data)) as probe:
-            if min(probe.size) < min_side:
+            w, h = probe.size
+            if min(w, h) < min_side or w * h > Image.MAX_IMAGE_PIXELS:
                 return None
         return get_image_from_bytes(data, max_side)
     except Exception:
@@ -378,24 +398,53 @@ def _descargar_full(url, max_side=2160, min_side=0, max_bytes=15_000_000):
 
 
 def _descargar_miniatura(item):
-    """Miniatura liviana (≤384 px) para verificar con Gemini: usa la del buscador y, si no hay, la imagen reducida."""
+    """Miniatura liviana (≤512 px): sirve para verificar con Gemini y para mostrarla en el chat."""
     if item.get("thumb"):
-        img = _descargar_full(item["thumb"], 384, min_side=80)
+        img = _descargar_full(item["thumb"], 512, min_side=150, max_bytes=1_500_000)
         if img:
             return img
-    return _descargar_full(item["url"], 384, min_side=300)
+    return _descargar_full(item["url"], 512, min_side=300, max_bytes=4_000_000)
 
 
 def _og_image(page_url):
     """Saca la foto principal (og:image) de una página de producto."""
     try:
-        r = HTTP.get(page_url, timeout=(4, 8))
-        r.raise_for_status()
-        txt = r.text[:300_000]
+        with HTTP.get(page_url, timeout=(4, 8), stream=True) as r:
+            r.raise_for_status()
+            raw = b""
+            for chunk in r.iter_content(32_768):
+                raw += chunk
+                if len(raw) >= 300_000:
+                    break
+        txt = raw.decode(r.encoding or "utf-8", errors="ignore")
+        page_url = r.url  # URL final (los enlaces de Gemini pasan por una redirección)
         m = OG_RE.search(txt) or OG_RE2.search(txt)
         return urljoin(page_url, html.unescape(m.group(1))) if m else None
     except Exception:
         return None
+
+
+def _paginas_gemini(producto, extra=None):
+    """Pide a Gemini (con búsqueda de Google) páginas de tiendas donde se vende el producto. Devuelve URLs."""
+    if not client:
+        return []
+    consulta = extra or producto["nombre"]
+    try:
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=(
+                f"Buscá en Google páginas de tiendas online de Argentina (Mercado Libre, Tiendanube, el sitio de la marca) "
+                f"donde se venda este producto exacto: {consulta}. Listá las mejores páginas de producto."
+            ),
+            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())], temperature=0.1),
+        )
+        meta = resp.candidates[0].grounding_metadata if resp.candidates else None
+        urls = [c.web.uri for c in (meta.grounding_chunks or []) if c.web and c.web.uri] if meta else []
+        logger.info("Gemini+Google: %d páginas", len(urls))
+        return urls[:8]
+    except Exception:
+        logger.warning("Gemini+Google no respondió", exc_info=True)
+        return []
 
 
 def _planear_queries(producto, referencia, extra=None):
@@ -453,48 +502,36 @@ def _filtro_relevancia(producto, extra=None):
     return lambda t: any(w in _norm(t) for w in claves)
 
 
-def _recolectar_urls(queries, relevante):
+def _recolectar_urls(queries, relevante, producto=None, extra=None):
     """Devuelve candidatas como dicts {url, thumb, texto}. No descarga imágenes completas."""
     items, vistos = [], set()
-    stats = {"serper": 0, "paginas": 0, "ddg": 0, "descartadas": 0, "chicas": 0}
+    stats = {"paginas": 0, "ddg": 0, "descartadas": 0, "chicas": 0}
 
-    def agregar(url, texto, fuente, thumb=None, ancho=None, alto=None):
+    def agregar(url, texto, fuente, thumb=None, ancho=None, alto=None, confiable=False):
         if not url or url in vistos:
             return
         vistos.add(url)
         if isinstance(ancho, int) and isinstance(alto, int) and min(ancho, alto) < 400:
             stats["chicas"] += 1
             return
-        if relevante(f"{texto} {url}"):
+        if confiable or relevante(f"{texto} {url}"):
             items.append({"url": url, "thumb": thumb, "texto": texto})
             stats[fuente] += 1
         else:
             stats["descartadas"] += 1
 
-    # 1) Google Imágenes vía Serper (si hay clave): la fuente más confiable
-    if SERPER_API_KEY:
-        for q in queries[:4]:
-            try:
-                r = HTTP.post(
-                    "https://google.serper.dev/images",
-                    headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                    json={"q": q, "gl": "ar", "hl": "es", "num": 10},
-                    timeout=15,
-                )
-                r.raise_for_status()
-                for it in r.json().get("images", []):
-                    agregar(
-                        it.get("imageUrl"), f"{it.get('title', '')} {it.get('source', '')} {it.get('link', '')}", "serper",
-                        thumb=it.get("thumbnailUrl"), ancho=it.get("imageWidth"), alto=it.get("imageHeight"),
-                    )
-            except Exception:
-                logger.warning("Serper falló: %s", q, exc_info=True)
-
     DDGS = _get_ddgs()
 
-    # 2) Foto principal (og:image) de páginas de tiendas que mencionan el producto
+    # 1) Foto principal (og:image) de páginas de tiendas que mencionan el producto
     paginas = {}
-    for q in queries[:3]:
+    for u in _paginas_gemini(producto, extra) if producto else []:
+        paginas[u] = True  # las verifica Gemini después, comparando la foto con tu referencia
+    if producto:
+        base = extra or " ".join(x for x in (producto.get("tipo"), producto.get("marca"), producto.get("fragancia")) if x) or producto["nombre"]
+        sitios = [f"site:mercadolibre.com.ar {base}", f"site:tiendanube.com {base}"]
+    else:
+        sitios = []
+    for q in queries[:3] + sitios:
         try:
             with DDGS() as d:
                 for r in d.text(q, region="ar-es", max_results=6):
@@ -504,10 +541,10 @@ def _recolectar_urls(queries, relevante):
         except Exception:
             logger.warning("Búsqueda de páginas fallida: %s", q, exc_info=True)
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for u in pool.map(_og_image, list(paginas)[:10]):
-            agregar(u, "", "paginas")
+        for u in pool.map(_og_image, list(paginas)[:16]):
+            agregar(u, "", "paginas", confiable=True)
 
-    # 3) Búsqueda de imágenes de DuckDuckGo/Bing (menos confiable: solo si falta material)
+    # 2) Imágenes de DuckDuckGo/Bing (sin clave de API)
     for q in queries:
         if len(items) >= 10:
             break
@@ -555,18 +592,15 @@ def buscar_imagenes_web(producto, referencia, extra=None):
 
 
 def _con_vista_previa(elegidos):
-    """Para las candidatas verificadas, baja una vista previa nítida (~900 px). Guarda solo bytes livianos y la URL."""
-    def uno(par):
-        it, mini = par
-        prev = _descargar_full(it["url"], 900, min_side=300)
-        return {
+    """La vista previa es la miniatura ya descargada (≤512 px). La imagen original se baja solo si la aprobás."""
+    return [
+        {
             "url": it["url"],
-            "preview": to_jpeg(prev or mini, 900, 85),
-            "miniatura": prev is None,
+            "preview": to_jpeg(mini, 512, 80),
             "fuente": urlparse(it["url"]).netloc.replace("www.", ""),
         }
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        return list(pool.map(uno, elegidos))
+        for it, mini in elegidos
+    ]
 
 
 def _buscar_imagenes_web(producto, referencia, extra=None):
@@ -574,7 +608,7 @@ def _buscar_imagenes_web(producto, referencia, extra=None):
     nivel: 'exacto' | 'parcial' (misma marca/línea) | 'vacio' | 'error'. Nunca devuelve fotos sin verificar."""
     queries = _planear_queries(producto, referencia, extra)
     logger.info("Consultas: %s", queries)
-    items = _recolectar_urls(queries, _filtro_relevancia(producto, extra))
+    items = _recolectar_urls(queries, _filtro_relevancia(producto, extra), producto, extra)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         minis = list(pool.map(_descargar_miniatura, items[:20]))
@@ -613,7 +647,17 @@ def _buscar_imagenes_web(producto, referencia, extra=None):
 
 
 # ───────────────────────── Publicación ─────────────────────────
+_drive = None
+
+
 def _drive_service():
+    global _drive
+    if _drive is None:
+        _drive = _build_drive()
+    return _drive
+
+
+def _build_drive():
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
@@ -727,7 +771,7 @@ def _con_busqueda_manual(kb):
 
 async def mostrar_resultados(bot, chat_id, ud, extra=None):
     estado = await bot.send_message(chat_id, "🌐 Buscando y verificando imágenes (puede tardar ~40 s)…")
-    referencia = get_image_from_bytes(ud["original"])
+    referencia = await asyncio.to_thread(get_image_from_bytes, ud["original"])
     results, nivel = await asyncio.to_thread(buscar_imagenes_web, ud["producto"], referencia, extra)
     await estado.delete()
     if not results:
@@ -738,8 +782,6 @@ async def mostrar_resultados(bot, chat_id, ud, extra=None):
                 "⚠️ No encontré fotos que pueda confirmar como ese producto. "
                 "Probá con tus propias palabras (ej: «difusor iluminarte prestige mil flores») o elegí otra opción."
             )
-            if not SERPER_API_KEY:
-                texto += "\n\n💡 Para resultados mucho mejores, configurá SERPER_API_KEY (Google Imágenes)."
         await bot.send_message(chat_id, texto, reply_markup=_con_busqueda_manual(inicio_kb()))
         return
     ud["web"] = results
@@ -752,16 +794,15 @@ async def mostrar_resultados(bot, chat_id, ud, extra=None):
         await bot.send_message(chat_id, avisos[nivel])
     await bot.send_message(
         chat_id,
-        f"👇 Son vistas previas. Si te gusta una, tocá «Aprobar»: descargo la original, la ajusto a "
-        f"{POST_SIZE[0]}x{POST_SIZE[1]} y la guardo.",
+        f"👇 Son miniaturas. Si te gusta una, tocá «Aprobar»: descargo la original en buena calidad, "
+        f"la ajusto a {POST_SIZE[0]}x{POST_SIZE[1]} y la mando a Drive.",
     )
     for i, it in enumerate(results):
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Aprobar y guardar", callback_data=f"ap_{sid}_{i}"),
             InlineKeyboardButton("⚪ Fondo blanco y guardar", callback_data=f"apb_{sid}_{i}"),
         ]])
-        nota = " (solo hay miniatura)" if it.get("miniatura") else ""
-        await bot.send_photo(chat_id, it["preview"], caption=f"🖼️ Opción {i + 1} · {it['fuente']}{nota}", reply_markup=kb)
+        await bot.send_photo(chat_id, it["preview"], caption=f"🖼️ Opción {i + 1} · {it['fuente']}", reply_markup=kb)
     await bot.send_message(
         chat_id, "Cuando termines, decidí qué hacer 👇",
         reply_markup=_con_busqueda_manual(acciones_kb()),
@@ -817,7 +858,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado = await msg.reply_text("🔎 Leyendo el producto…")
     try:
         tg_file = await (msg.photo[-1] if msg.photo else msg.document).get_file()
-        original = get_image_from_bytes(bytes(await tg_file.download_as_bytearray()))
+        original = await asyncio.to_thread(get_image_from_bytes, bytes(await tg_file.download_as_bytearray()))
         producto = await asyncio.to_thread(identificar_producto, original)
 
         ud = context.user_data
@@ -880,7 +921,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "bg":
             await query.answer("Quitando el fondo…")
-            img = get_image_from_bytes(ud["original"])
+            img = await asyncio.to_thread(get_image_from_bytes, ud["original"])
             blanca, ok = await asyncio.to_thread(fondo_blanco, img)
             b = to_jpeg(blanca, max(POST_SIZE), 92)
             _agregar(ud, b)
@@ -912,10 +953,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await query.answer("Descargando la original…")
             item = ud["web"][idx]
-            img = await asyncio.to_thread(_descargar_full, item["url"], 2160, 300)
-            baja = img is None
-            if baja:
-                img = get_image_from_bytes(item["preview"])
+            img = await asyncio.to_thread(_descargar_full, item["url"], 1600, 300)
+            if img is None:
+                await bot.send_message(
+                    chat_id,
+                    "⚠️ No pude bajar la original de esa página (la bloquea o es muy pesada). Probá con otra opción.",
+                )
+                return
             if kind == "apb":
                 final, _ = await asyncio.to_thread(fondo_blanco, img)
             else:
@@ -924,8 +968,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del img, final
             _agregar(ud, b)
             notas = []
-            if baja:
-                notas.append("⚠️ No pude bajar la original; usé la vista previa (menor calidad).")
             if GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY:
                 try:
                     links = await asyncio.to_thread(guardar_en_drive, [b], _nombre_archivo(ud))
